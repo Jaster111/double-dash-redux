@@ -43,6 +43,23 @@ static ID3D11InputLayout* s_layout;
 static ID3D11Buffer* s_vb;
 static ID3D11Buffer* s_ib;
 static ID3D11Buffer* s_ps_cb;
+
+// pixel shader constants (cbuffer PS in shader.cpp)
+struct PSConstants {
+    s32 reg[4][4];
+    s32 k[4][4];
+    s32 aref[4];
+    float texdim[8][4];
+    float fog0[4], fog1[4];
+    s32 ind[6][4];
+    float indscale[2][4];
+    s32 cdst[4];
+    s32 zbias[4];
+    s32 fogi[4];
+    float fogrange[3][4];
+};
+static_assert(sizeof(PSConstants) % 16 == 0, "cbuffer size");
+
 static const u32 VB_VERTS = 65536 * 4;
 static u32 s_vb_pos;
 static bool s_ok;
@@ -57,7 +74,8 @@ static ID3D11SamplerState* s_point_clamp;
 static u32 s_frame;
 static u32 s_draws_this_field;
 static u32 s_fields;
-// DD_DBG_FLAGS bits (renderer debugging): 1 no culling, 2 no depth test, 4 no depth writes, 8 clear depth to 1.0
+// DD_DBG_FLAGS bits (renderer debugging): 1 no culling, 2 no depth test, 4 no depth writes, 8 clear depth to 1.0,
+// 0x40 no fog, 0x80 fog colour magenta (shows where fog is applied)
 static const u32 dbg_flags = getenv("DD_DBG_FLAGS") ? (u32)strtoul(getenv("DD_DBG_FLAGS"), nullptr, 0) : 0;
 // DD_DBG_FIELD: field number for the per-draw / copy debug dumps and depth probes (0 = all off)
 static const u32 dbg_field = getenv("DD_DBG_FIELD") ? (u32)atoi(getenv("DD_DBG_FIELD")) : 0;
@@ -245,7 +263,7 @@ void gx_render_init() {
     bd.BindFlags = D3D11_BIND_INDEX_BUFFER;
     s_dev->CreateBuffer(&bd, nullptr, &s_ib);
     // constant buffers are updated with UpdateSubresource: DEFAULT usage, no CPU access
-    bd.ByteWidth = 512; bd.BindFlags = D3D11_BIND_CONSTANT_BUFFER;
+    bd.ByteWidth = sizeof(PSConstants); bd.BindFlags = D3D11_BIND_CONSTANT_BUFFER;
     bd.Usage = D3D11_USAGE_DEFAULT; bd.CPUAccessFlags = 0;
     s_dev->CreateBuffer(&bd, nullptr, &s_ps_cb);
     bd.ByteWidth = sizeof(BlitCB);
@@ -537,17 +555,14 @@ static ID3D11ShaderResourceView* get_texture(u32 map, u32* out_w, u32* out_h) {
 }
 
 // ---------------------------------------------------------------- per-draw state
-struct PSConstants {
-    s32 reg[4][4];
-    s32 k[4][4];
-    s32 aref[4];
-    float texdim[8][4];
-    float fog0[4], fog1[4];
-    s32 ind[6][4];
-    float indscale[2][4];
-    s32 cdst[4];
-    s32 zbias[4];
-};
+
+// BP fog A / C registers: 11-bit mantissa, 8-bit exponent, sign (a float with the low mantissa bits cut)
+static float fog_float(u32 v) {
+    u32 bits = (((v >> 19) & 1) << 31) | (((v >> 11) & 0xFF) << 23) | ((v & 0x7FF) << 12);
+    float f;
+    memcpy(&f, &bits, 4);
+    return f;
+}
 
 // TEV colour registers and konstants are written through BP 0xE0..0xE7
 static s32 s_tev_reg[4][4], s_tev_k[4][4];
@@ -829,6 +844,37 @@ void gx_draw(u32 prim, u32 vat, u32 count, const u8* data) {
     cb.aref[0] = ac & 0xFF; cb.aref[1] = (ac >> 8) & 0xFF;
     cb.cdst[0] = g_gx.bp[0x42] & 0xFF;
     cb.zbias[0] = (s32)(g_gx.bp[0xF4] & 0xFFFFFF);
+    if (key.fog) {
+        const u32* bp = g_gx.bp;
+        cb.fog0[0] = fog_float(bp[0xEE]);
+        cb.fog0[1] = fog_float(bp[0xF1]);
+        cb.fogi[0] = (s32)(bp[0xEF] & 0xFFFFFF);
+        cb.fogi[1] = (s32)(bp[0xF0] & 0x1F);
+        u32 col = bp[0xF2];
+        if (dbg_flags & 0x80) col = 0xFF00FF;
+        cb.fog1[0] = (float)((col >> 16) & 0xFF); cb.fog1[1] = (float)((col >> 8) & 0xFF); cb.fog1[2] = (float)(col & 0xFF);
+        // log the first few distinct fog setups (which scenes use fog)
+        static u32 s_fog_logged, s_fog_last[5];
+        u32 cur[5] = {key.fog, bp[0xEE], bp[0xEF], bp[0xF1], col};
+        if (s_fog_logged < 16 && memcmp(cur, s_fog_last, sizeof cur)) {
+            s_fog_logged++;
+            memcpy(s_fog_last, cur, sizeof cur);
+            LOG("gx", "field %u: fog mode %02X A=%g B=%u>>%u C=%g color=%06X range=%03X", s_fields, key.fog, cb.fog0[0],
+                cb.fogi[0], cb.fogi[1], cb.fog0[1], col & 0xFFFFFF, bp[0xE8] & 0x7FF);
+        }
+        if (key.fog & 16) {
+            // range adjustment: screen-space centre (BP 0xE8, offset by 342 like the viewport) and a table
+            // of 10 x 12-bit k coefficients (BP 0xE9..0xED), 1.0 = 256
+            float wd2 = 2.0f * xf_f(0x101A);
+            if (wd2 == 0.0f) wd2 = (float)EFB_W;
+            cb.fog0[2] = ((float)((s32)(bp[0xE8] & 0x3FF) - 342) / wd2) * 2.0f - 1.0f;
+            cb.fog0[3] = wd2 * EFB_SCALE;
+            for (int i = 0; i < 10; i++) {
+                u32 r = bp[0xE9 + i / 2] >> (12 * (i & 1));
+                cb.fogrange[i / 4][i % 4] = (float)(r & 0xFFF) / 256.0f * 4.0f;
+            }
+        }
+    }
     for (int i = 0; i < 3; i++) {
         u32 a = g_gx.bp[0x06 + 3 * i], b = g_gx.bp[0x07 + 3 * i], c = g_gx.bp[0x08 + 3 * i];
         s32 scale = (s32)(((a >> 22) & 3) | (((b >> 22) & 3) << 2) | (((c >> 22) & 3) << 4)) - 17;

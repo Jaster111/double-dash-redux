@@ -10,7 +10,7 @@ struct ShaderKey {
     u32 ind_order;
     u32 alpha_cmp;
     u32 dst_alpha;
-    u32 fog;
+    u32 fog;         // BP 0xF1 fsel (bits 0-2) | orthographic (bit 3) | range adjust (bit 4); 0 when fog is off
     u32 ztex;        // BP 0xF5: type (bits 0-1) | op (bits 2-3); 0 when z-texturing is off
     bool operator==(const ShaderKey& o) const { return memcmp(this, &o, sizeof *this) == 0; }
 };

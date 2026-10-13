@@ -71,7 +71,9 @@ ShaderKey gx_shader_key() {
     k.alpha_cmp = (ac >> 16) & 0xFF;
     u32 cm1 = bp[0x42];
     k.dst_alpha = (cm1 >> 8) & 1;
-    k.fog = (bp[0xF1] >> 21) & 7;
+    u32 fsel = (bp[0xF1] >> 21) & 7;
+    static const bool no_fog = getenv("DD_DBG_FLAGS") && (strtoul(getenv("DD_DBG_FLAGS"), nullptr, 0) & 0x40);
+    k.fog = fsel && !no_fog ? fsel | (((bp[0xF1] >> 20) & 1) << 3) | (((bp[0xE8] >> 10) & 1) << 4) : 0;
     k.ztex = ((bp[0xF5] >> 2) & 3) ? (bp[0xF5] & 0xF) : 0;
     k.num_ind_used = k.num_ind;
     return k;
@@ -82,6 +84,7 @@ std::string gx_shader_source(const ShaderKey& k) {
     s += "cbuffer PS : register(b0) {\n"
          "  int4 c_reg[4]; int4 c_k[4]; int4 c_aref; float4 c_texdim[8];\n"
          "  float4 c_fog0; float4 c_fog1; int4 c_ind[6]; float4 c_indscale[2]; int4 c_cdst; int4 c_zbias;\n"
+         "  int4 c_fogi; float4 c_fogrange[3];\n"
          "};\n";
     for (int i = 0; i < 8; i++) s += fmt("Texture2D t%d : register(t%d); SamplerState s%d : register(s%d);\n", i, i, i, i);
     s += "struct PSIn { float4 pos : SV_Position; float4 col0 : COLOR0; float4 col1 : COLOR1;";
@@ -207,7 +210,6 @@ std::string gx_shader_source(const ShaderKey& k) {
             s += fmt("  if (!((%s) %s (%s))) discard;\n", a.c_str(), lop, b.c_str());
         }
     }
-    if (k.dst_alpha) s += "  o_src1 = float4(outc) / 255.0;\n  outc.a = c_cdst.x;\n";
     if (k.ztex) {
         // z texture: depth from the last stage's texel (U8: a, U16: r + a*256, U24: r<<16 | g<<8 | b) plus
         // bias, replacing or added to the rasterised depth
@@ -218,6 +220,31 @@ std::string gx_shader_source(const ShaderKey& k) {
         if (op == 1) s += "  zt += int(i.pos.z * 16777216.0);\n";
         s += "  o_depth = float(zt & 0xFFFFFF) / 16777216.0;\n";
     }
+    if (k.fog) {
+        // fog (equations as documented by the Dolphin project): eye-space z from the 24-bit screen z,
+        //   perspective: ze = A / (B_mag - (z >> B_shift)),  orthographic: ze = A * z
+        // optionally scaled by the horizontal range adjustment, then fog = curve(saturate(ze - C))
+        s += k.ztex ? "  int zc = zt & 0xFFFFFF;\n" : "  int zc = int(i.pos.z * 16777216.0);\n";
+        if (k.fog & 8) s += "  float ze = c_fog0.x * float(zc) / 16777216.0;\n";
+        else s += "  float ze = (c_fog0.x * 16777216.0) / float(c_fogi.x - (zc >> c_fogi.y));\n";
+        if (k.fog & 16)
+            s += "  float foff = 2.0 * (i.pos.x / c_fog0.w) - 1.0 - c_fog0.z;\n"
+                 "  float fidx = clamp(9.0 - abs(foff) * 9.0, 0.0, 9.0);\n"
+                 "  uint fil = uint(fidx), fiu = fil + 1u;\n"
+                 "  float fk = lerp(c_fogrange[fil >> 2u][fil & 3u], c_fogrange[fiu >> 2u][fiu & 3u], frac(fidx));\n"
+                 "  ze *= sqrt(foff * foff + fk * fk) / fk;\n";
+        s += "  float fog = saturate(ze - c_fog0.y);\n";
+        switch (k.fog & 7) {
+        case 4: s += "  fog = 1.0 - exp2(-8.0 * fog);\n"; break;
+        case 5: s += "  fog = 1.0 - exp2(-8.0 * fog * fog);\n"; break;
+        case 6: s += "  fog = exp2(-8.0 * (1.0 - fog));\n"; break;
+        case 7: s += "  fog = 1.0 - fog;\n  fog = exp2(-8.0 * fog * fog);\n"; break;
+        default: break;   // 2 = linear (1 and 3 are undocumented: treated as linear)
+        }
+        s += "  int ifog = int(round(fog * 256.0));\n"
+             "  outc.rgb = (outc.rgb * (256 - ifog) + int3(c_fog1.rgb) * ifog) >> 8;\n";
+    }
+    if (k.dst_alpha) s += "  o_src1 = float4(outc) / 255.0;\n  outc.a = c_cdst.x;\n";
     s += "  return float4(outc) / 255.0;\n}\n";
     return s;
 }
