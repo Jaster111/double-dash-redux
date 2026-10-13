@@ -15,6 +15,9 @@
 // DD_HANG_SECS=S   after the game has started rendering, report a hang when no game frame was
 //                  produced for S seconds (default 6): thread backtraces and device state.
 // DD_HANG_EXIT=1   exit with code 3 after reporting a hang (and 0 on `quit`).
+// Elsewhere: DD_PROF=1 sampling profiler (host/prof.cpp), DD_DBG_SLOW=ms extra time per game frame and
+// DD_NO_SHADER_CACHE=1 (gx/render.cpp), DD_60HZ=0 50 Hz only (hw/exi.cpp).  [hitch] log lines report VI
+// fields that repeated the previous frame while the game was rendering every field (visible stutter).
 #include "../common.h"
 #include <windows.h>
 #include <string>

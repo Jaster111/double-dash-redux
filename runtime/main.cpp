@@ -136,6 +136,8 @@ int main(int argc, char** argv) {
     setup_boot_info();
     void dbg_init();
     dbg_init();
+    void prof_init();
+    prof_init();
     CPU* c = os_create_boot_thread();
     CreateThread(nullptr, 0, watchdog, nullptr, 0, nullptr);
     c->msr = 0x00003032;    // FP | ME | IR | DR | RI, interrupts off

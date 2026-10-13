@@ -2,6 +2,7 @@
 // (pixel engine) register blocks.
 #include "gx.h"
 #include <windows.h>
+#include <intrin.h>
 #include "../hw/hw.h"
 #include <vector>
 
@@ -21,7 +22,10 @@ static u32 attr_size_direct_pos(u32 vat_a) {
     return cnt * kCompSize[fmt];
 }
 
-VtxLayout gx_vertex_layout(int v) {
+static VtxLayout s_layouts[8];
+static u32 s_layout_valid;   // bit per VAT: s_layouts[v] matches VCD / VAT
+
+static VtxLayout compute_vertex_layout(int v) {
     VtxLayout L;
     u32 lo = g_gx.vcd_lo, hi = g_gx.vcd_hi;
     u32 a = g_gx.vat_a[v], b = g_gx.vat_b[v], c = g_gx.vat_c[v];
@@ -62,6 +66,14 @@ VtxLayout gx_vertex_layout(int v) {
     return L;
 }
 
+const VtxLayout& gx_vertex_layout(int v) {
+    if (!(s_layout_valid & (1u << v))) {
+        s_layouts[v] = compute_vertex_layout(v);
+        s_layout_valid |= 1u << v;
+    }
+    return s_layouts[v];
+}
+
 // ---------------------------------------------------------------- CP register loads
 static void cp_load(u8 reg, u32 v) {
     if (reg == 0x30) g_gx.matindex_a = v;
@@ -73,6 +85,7 @@ static void cp_load(u8 reg, u32 v) {
     else if ((reg & 0xF8) == 0x90) g_gx.vat_c[reg & 7] = v;
     else if ((reg & 0xF0) == 0xA0) g_gx.array_base[reg & 15] = v & 0x03FFFFFFu;
     else if ((reg & 0xF0) == 0xB0) g_gx.array_stride[reg & 15] = v & 0xFF;
+    if (reg >= 0x50 && reg < 0xA0) s_layout_valid = 0;
     gx_on_cp(reg, v);
 }
 
@@ -114,8 +127,9 @@ static void bp_load(u32 w) {
 static inline u32 be32(const u8* p) { return ((u32)p[0] << 24) | ((u32)p[1] << 16) | ((u32)p[2] << 8) | p[3]; }
 static inline u16 be16(const u8* p) { return (u16)((p[0] << 8) | p[1]); }
 
-// returns bytes consumed, or 0 if the command is incomplete
-static size_t run_command(const u8* p, size_t avail, int depth);
+// returns bytes consumed, or 0 if the command is incomplete (then *need, if given, is a lower bound
+// on the bytes the command needs)
+static size_t run_command(const u8* p, size_t avail, int depth, size_t* need = nullptr);
 
 static void run_display_list(u32 addr, u32 size, int depth) {
     if (depth > 4) { LOG("gx", "display list nesting too deep"); return; }
@@ -128,7 +142,7 @@ static void run_display_list(u32 addr, u32 size, int depth) {
     }
 }
 
-static size_t run_command(const u8* p, size_t avail, int depth) {
+static size_t run_command(const u8* p, size_t avail, int depth, size_t* need) {
     u8 cmd = p[0];
     switch (cmd) {
     case 0x00: return 1;                                       // NOP
@@ -165,24 +179,24 @@ static size_t run_command(const u8* p, size_t avail, int depth) {
         if (avail < 3) return 0;
         u32 vat = cmd & 7, prim = (cmd >> 3) & 0xF;
         u32 count = be16(p + 1);
-        VtxLayout L = gx_vertex_layout(vat);
-        size_t need = 3 + (size_t)count * L.size;
-        if (avail < need) return 0;
+        size_t total = 3 + (size_t)count * gx_vertex_layout(vat).size;
+        if (avail < total) { if (need) *need = total; return 0; }
         if (count) gx_draw(prim, vat, count, p + 3);
-        return need;
+        return total;
     }
     static int warned;
     if (warned++ < 20) LOG("gx", "unknown FIFO command %02X", cmd);
     return 1;
 }
 
-u64 g_prof_fifo_ticks;   // profiling: QPC ticks spent parsing the FIFO (includes drawing)
+u64 g_prof_fifo_ticks;   // profiling: TSC ticks spent parsing the FIFO (includes drawing)
+static size_t s_need;   // bytes the incomplete command at s_rd needs: don't re-parse before they are there
 static void pump() {
-    LARGE_INTEGER t0, t1;
-    QueryPerformanceCounter(&t0);
-    struct Done { LARGE_INTEGER& a; LARGE_INTEGER& b; ~Done() { QueryPerformanceCounter(&b); g_prof_fifo_ticks += b.QuadPart - a.QuadPart; } } done{t0, t1};
+    if (s_buf.size() - s_rd < s_need) return;
+    struct Done { u64 t0 = __rdtsc(); ~Done() { g_prof_fifo_ticks += __rdtsc() - t0; } } done;
+    s_need = 0;
     while (s_rd < s_buf.size()) {
-        size_t n = run_command(&s_buf[s_rd], s_buf.size() - s_rd, 0);
+        size_t n = run_command(&s_buf[s_rd], s_buf.size() - s_rd, 0, &s_need);
         if (!n) break;
         s_rd += n;
     }
@@ -192,13 +206,14 @@ static void pump() {
     }
 }
 
-void gx_fifo_write8(u8 v) { s_buf.push_back(v); pi_fifo_advance(1); pump(); }
-void gx_fifo_write16(u16 v) { s_buf.push_back((u8)(v >> 8)); s_buf.push_back((u8)v); pi_fifo_advance(2); pump(); }
-void gx_fifo_write32(u32 v) {
-    s_buf.push_back((u8)(v >> 24)); s_buf.push_back((u8)(v >> 16)); s_buf.push_back((u8)(v >> 8)); s_buf.push_back((u8)v);
-    pi_fifo_advance(4);
-    pump();
+static inline void fifo_put(const void* p, size_t n) {
+    size_t at = s_buf.size();
+    s_buf.resize(at + n);
+    memcpy(&s_buf[at], p, n);
 }
+void gx_fifo_write8(u8 v) { s_buf.push_back(v); pi_fifo_advance(1); pump(); }
+void gx_fifo_write16(u16 v) { u16 b = BSWAP16(v); fifo_put(&b, 2); pi_fifo_advance(2); pump(); }
+void gx_fifo_write32(u32 v) { u32 b = BSWAP32(v); fifo_put(&b, 4); pi_fifo_advance(4); pump(); }
 
 void gx_init() { gx_render_init(); }
 void gx_vi_retrace() { gx_on_retrace(); }

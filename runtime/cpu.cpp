@@ -165,7 +165,7 @@ static double ldexp_fast(double v, int e) { return ldexp(v, e); }
 
 static int gqr_scale(u32 six) { return (int)((six ^ 0x20) - 0x20); }   // 6-bit signed
 
-void psq_load(CPU* c, u32 ea, int rd, int w, int qi) {
+void psq_load_quantized(CPU* c, u32 ea, int rd, int w, int qi) {
     u32 g = c->gqr[qi];
     u32 type = (g >> 16) & 7;
     int scale = gqr_scale((g >> 24) & 0x3F);
@@ -192,7 +192,7 @@ static T quant(double v, int scale, double lo, double hi) {
     return (T)(s64)s;
 }
 
-void psq_store(CPU* c, u32 ea, int rs, int w, int qi) {
+void psq_store_quantized(CPU* c, u32 ea, int rs, int w, int qi) {
     u32 g = c->gqr[qi];
     u32 type = g & 7;
     int scale = gqr_scale((g >> 8) & 0x3F);

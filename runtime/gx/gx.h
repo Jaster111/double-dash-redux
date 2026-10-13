@@ -23,7 +23,7 @@ struct VtxLayout {
     u32 pmidx, tmidx[8];
     u32 pos, nrm, col[2], tex[8];
 };
-VtxLayout gx_vertex_layout(int vat);
+const VtxLayout& gx_vertex_layout(int vat);   // cached until a VCD / VAT write
 
 // renderer hooks (gx/render.cpp)
 void gx_render_init();

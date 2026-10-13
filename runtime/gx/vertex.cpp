@@ -171,72 +171,111 @@ static void unpack_rgba(u32 c, float out[4]) {
     out[0] = (c >> 24) / 255.0f; out[1] = ((c >> 16) & 255) / 255.0f; out[2] = ((c >> 8) & 255) / 255.0f; out[3] = (c & 255) / 255.0f;
 }
 
-// one lighting channel component set (rgb or alpha) for channel `chan`
-static void light_channel(u32 ctrl, u32 amb_reg, u32 mat_reg, const float* vcol, const float pos[3], const float nrm[3],
-                          bool alpha, float* out_comp) {
+// ---------------------------------------------------------------- per-draw lighting / texgen setup
+// Everything derived from XF registers is decoded once per draw; the per-vertex loops only do arithmetic.
+struct LightParams {
+    float col[4];
+    float pos[3], dir[3];
+    float a[3], k[3];
+    float pos_n[3];   // normalised position (specular lights use it as the light direction for N.L)
+};
+
+// one lighting channel component set: colour (rgb) or alpha of channel 0 / 1
+struct LitComp {
+    bool lit, mat_vtx, amb_vtx, attn_en, spot;
+    u32 diff_fn;
     float mat[4], amb[4];
-    unpack_rgba(mat_reg, mat);
-    unpack_rgba(amb_reg, amb);
-    if (ctrl & 1) memcpy(mat, vcol, sizeof mat);            // material from vertex
-    if (ctrl & 0x40) memcpy(amb, vcol, sizeof amb);         // ambient from vertex
-    int c0 = alpha ? 3 : 0, c1 = alpha ? 4 : 3;
-    if (!(ctrl & 2)) {                                      // lighting disabled: material only
-        for (int k = c0; k < c1; k++) out_comp[k] = mat[k];
+    u32 nlights;
+    u8 lights[8];
+    int c0, c1;       // component range: 0..3 colour, 3..4 alpha
+};
+
+static void setup_light(u32 l, LightParams& L) {
+    u32 base = 0x600 + l * 0x10;
+    unpack_rgba(g_gx.xfmem[base + 3], L.col);
+    for (int i = 0; i < 3; i++) {
+        L.a[i] = xf_float(base + 4 + i);
+        L.k[i] = xf_float(base + 7 + i);
+        L.pos[i] = xf_float(base + 10 + i);
+        L.dir[i] = xf_float(base + 13 + i);
+    }
+    float ln = sqrtf(L.pos[0] * L.pos[0] + L.pos[1] * L.pos[1] + L.pos[2] * L.pos[2]);
+    for (int i = 0; i < 3; i++) L.pos_n[i] = ln > 0 ? L.pos[i] / ln : 0.0f;
+}
+
+static void setup_litcomp(u32 ctrl, u32 amb_reg, u32 mat_reg, bool alpha, LitComp& C, u32& lights_used) {
+    C.mat_vtx = ctrl & 1;
+    C.amb_vtx = (ctrl >> 6) & 1;
+    C.lit = (ctrl >> 1) & 1;
+    unpack_rgba(mat_reg, C.mat);
+    unpack_rgba(amb_reg, C.amb);
+    C.c0 = alpha ? 3 : 0;
+    C.c1 = alpha ? 4 : 3;
+    u32 mask = ((ctrl >> 2) & 15) | (((ctrl >> 11) & 15) << 4);
+    C.diff_fn = (ctrl >> 7) & 3;
+    C.attn_en = (ctrl >> 9) & 1;
+    C.spot = (ctrl >> 10) & 1;
+    C.nlights = 0;
+    if (C.lit)
+        for (u32 l = 0; l < 8; l++)
+            if (mask & (1u << l)) { C.lights[C.nlights++] = (u8)l; lights_used |= 1u << l; }
+}
+
+static void light_comp(const LitComp& C, const LightParams* lights, const float* vcol, const float pos[3], const float nrm[3],
+                       float* out_comp) {
+    const float* mat = C.mat_vtx ? vcol : C.mat;
+    if (!C.lit) {                                           // lighting disabled: material only
+        for (int k = C.c0; k < C.c1; k++) out_comp[k] = mat[k];
         return;
     }
+    const float* amb = C.amb_vtx ? vcol : C.amb;
     float acc[4] = {amb[0], amb[1], amb[2], amb[3]};
-    u32 mask = ((ctrl >> 2) & 15) | (((ctrl >> 11) & 15) << 4);
-    u32 diff_fn = (ctrl >> 7) & 3;
-    bool attn_en = (ctrl >> 9) & 1, spot = (ctrl >> 10) & 1;
-    for (int l = 0; l < 8; l++) {
-        if (!(mask & (1 << l))) continue;
-        u32 base = 0x600 + l * 0x10;
-        float lcol[4];
-        unpack_rgba(g_gx.xfmem[base + 3], lcol);
-        float lp[3] = {xf_float(base + 10), xf_float(base + 11), xf_float(base + 12)};
-        float ld[3] = {xf_float(base + 13), xf_float(base + 14), xf_float(base + 15)};
-        float L[3] = {lp[0] - pos[0], lp[1] - pos[1], lp[2] - pos[2]};
+    for (u32 i = 0; i < C.nlights; i++) {
+        const LightParams& Lp = lights[C.lights[i]];
+        float L[3] = {Lp.pos[0] - pos[0], Lp.pos[1] - pos[1], Lp.pos[2] - pos[2]};
         float dist2 = L[0] * L[0] + L[1] * L[1] + L[2] * L[2];
         float dist = sqrtf(dist2);
         float attn = 1.0f;
         if (dist > 0) { L[0] /= dist; L[1] /= dist; L[2] /= dist; }
         float ndotl = nrm[0] * L[0] + nrm[1] * L[1] + nrm[2] * L[2];
-        if (attn_en) {
-            float a0 = xf_float(base + 4), a1 = xf_float(base + 5), a2 = xf_float(base + 6);
-            float k0 = xf_float(base + 7), k1 = xf_float(base + 8), k2 = xf_float(base + 9);
-            if (spot) {
-                float cosa = L[0] * ld[0] + L[1] * ld[1] + L[2] * ld[2];
+        if (C.attn_en) {
+            if (C.spot) {
+                float cosa = L[0] * Lp.dir[0] + L[1] * Lp.dir[1] + L[2] * Lp.dir[2];
                 if (cosa < 0) cosa = 0;
-                float num = a0 + a1 * cosa + a2 * cosa * cosa;
+                float num = Lp.a[0] + Lp.a[1] * cosa + Lp.a[2] * cosa * cosa;
                 if (num < 0) num = 0;
-                float den = k0 + k1 * dist + k2 * dist2;
+                float den = Lp.k[0] + Lp.k[1] * dist + Lp.k[2] * dist2;
                 attn = den != 0 ? num / den : 0;
             } else {
                 // specular: direction holds the half-angle vector
-                float ndoth = nrm[0] * ld[0] + nrm[1] * ld[1] + nrm[2] * ld[2];
+                float ndoth = nrm[0] * Lp.dir[0] + nrm[1] * Lp.dir[1] + nrm[2] * Lp.dir[2];
                 float cosa = ndotl > 0 ? (ndoth > 0 ? ndoth : 0) : 0;
-                float num = a0 + a1 * cosa + a2 * cosa * cosa;
+                float num = Lp.a[0] + Lp.a[1] * cosa + Lp.a[2] * cosa * cosa;
                 if (num < 0) num = 0;
-                float den = k0 + k1 * cosa + k2 * cosa * cosa;
+                float den = Lp.k[0] + Lp.k[1] * cosa + Lp.k[2] * cosa * cosa;
                 attn = den != 0 ? num / den : 0;
                 // specular lights use the light direction rather than position for N.L
-                float ln = sqrtf(lp[0] * lp[0] + lp[1] * lp[1] + lp[2] * lp[2]);
-                ndotl = ln > 0 ? (nrm[0] * lp[0] + nrm[1] * lp[1] + nrm[2] * lp[2]) / ln : 0;
+                ndotl = nrm[0] * Lp.pos_n[0] + nrm[1] * Lp.pos_n[1] + nrm[2] * Lp.pos_n[2];
             }
         }
-        float d = diff_fn == 0 ? 1.0f : diff_fn == 1 ? ndotl : (ndotl > 0 ? ndotl : 0);
-        float s = d * attn;
-        for (int k = c0; k < c1; k++) acc[k] += s * lcol[k];
+        float d = C.diff_fn == 0 ? 1.0f : C.diff_fn == 1 ? ndotl : (ndotl > 0 ? ndotl : 0);
+        float sc = d * attn;
+        for (int k = C.c0; k < C.c1; k++) acc[k] += sc * Lp.col[k];
     }
-    for (int k = c0; k < c1; k++) out_comp[k] = clamp01(acc[k]) * mat[k];
+    for (int k = C.c0; k < C.c1; k++) out_comp[k] = clamp01(acc[k]) * mat[k];
 }
+
+struct TexGen {
+    bool stq, abc1, post_norm;
+    u32 type, row, srcgen, post_base;
+};
 
 // ---------------------------------------------------------------- main entry
 // Decode `count` vertices and transform them into `out` (clip space for D3D).
 void gx_process_vertices(u32 vat, u32 count, const u8* data, GxOutVertex* out, const GxFrameTransform& ft) {
     Decoder dec;
     dec.init(vat);
-    VtxLayout L = gx_vertex_layout(vat);
+    const u32 vsize = gx_vertex_layout(vat).size;
     const u32* xf = g_gx.xfmem;
     float proj[7];
     for (int i = 0; i < 7; i++) memcpy(&proj[i], &xf[0x1020 + i], 4);
@@ -245,22 +284,48 @@ void gx_process_vertices(u32 vat, u32 count, const u8* data, GxOutVertex* out, c
     float vox = xf_float(0x101D), voy = xf_float(0x101E), voz = xf_float(0x101F);
     u32 numchans = xf[0x1009] & 3;
     u32 numtex = xf[0x103F] & 15;
+    if (numtex > 8) numtex = 8;
     bool dualtex = xf[0x1012] & 1;
+    // GX viewport -> EFB window coordinates, expressed in D3D clip space (keeps w for perspective):
+    //   x = ((cx * vsx + (vox - 342) * cw) / EFB_W) * 2 - cw,  y = cw - ((cy * vsy + (voy - 342) * cw) / EFB_H) * 2
+    const float kx = vsx * ft.inv_efb_w * 2.0f, bx = (vox - 342.0f) * ft.inv_efb_w * 2.0f - 1.0f;
+    const float ky = vsy * ft.inv_efb_h * 2.0f, by = 1.0f - (voy - 342.0f) * ft.inv_efb_h * 2.0f;
+    const float kz = vsz * (1.0f / 16777216.0f), bz = voz * (1.0f / 16777216.0f);
+
+    LitComp lit[2][2];   // [channel][colour, alpha]
+    LightParams lights[8];
+    u32 lights_used = 0;
+    for (u32 ch = 0; ch < numchans && ch < 2; ch++) {
+        setup_litcomp(xf[0x100E + ch], xf[0x100A + ch], xf[0x100C + ch], false, lit[ch][0], lights_used);
+        setup_litcomp(xf[0x1010 + ch], xf[0x100A + ch], xf[0x100C + ch], true, lit[ch][1], lights_used);
+    }
+    for (u32 l = 0; l < 8; l++) if (lights_used & (1u << l)) setup_light(l, lights[l]);
+
+    TexGen tg[8];
+    for (u32 t = 0; t < numtex; t++) {
+        u32 info = xf[0x1040 + t];
+        tg[t].stq = (info >> 1) & 1;
+        tg[t].abc1 = (info >> 2) & 1;
+        tg[t].type = (info >> 4) & 7;
+        tg[t].row = (info >> 7) & 31;
+        tg[t].srcgen = (info >> 12) & 7;
+        u32 post = xf[0x1050 + t];
+        tg[t].post_norm = (post & 0x100) != 0;
+        tg[t].post_base = 0x500 + (post & 63) * 4;
+    }
 
     for (u32 n = 0; n < count; n++) {
         RawVertex v;
-        dec.decode(data + (size_t)n * L.size, v);
+        dec.decode(data + (size_t)n * vsize, v);
         GxOutVertex& o = out[n];
         // position
         float p4[4] = {v.pos[0], v.pos[1], v.pos[2], 1.0f};
         float ep[3];
         mul34(v.pmidx * 4, p4, ep);
-        float en[3] = {0, 0, 1}, eb[3] = {0, 0, 0}, et[3] = {0, 0, 0};
+        float en[3] = {0, 0, 1};
         if (v.has_nrm) {
-            u32 nb = 0x400 + (v.pmidx & 31) * 3;
-            mul33(nb, v.nrm, en);
+            mul33(0x400 + (v.pmidx & 31) * 3, v.nrm, en);
             normalize3(en);
-            if (dec.nbt) { mul33(nb, v.bin, eb); mul33(nb, v.tan, et); normalize3(eb); normalize3(et); }
         }
         float cx, cy, cz, cw;
         if (!ortho) {
@@ -274,10 +339,9 @@ void gx_process_vertices(u32 vat, u32 count, const u8* data, GxOutVertex* out, c
             cz = proj[4] * ep[2] + proj[5];
             cw = 1.0f;
         }
-        // GX viewport -> EFB window coordinates, expressed in D3D clip space (keeps w for perspective)
-        o.pos[0] = ((cx * vsx + (vox - 342.0f) * cw) * ft.inv_efb_w) * 2.0f - cw;
-        o.pos[1] = cw - ((cy * vsy + (voy - 342.0f) * cw) * ft.inv_efb_h) * 2.0f;
-        o.pos[2] = (cz * vsz + voz * cw) * (1.0f / 16777216.0f);
+        o.pos[0] = cx * kx + bx * cw;
+        o.pos[1] = by * cw - cy * ky;
+        o.pos[2] = cz * kz + bz * cw;
         o.pos[3] = cw;
         // colors
         float vc[2][4];
@@ -289,57 +353,49 @@ void gx_process_vertices(u32 vat, u32 count, const u8* data, GxOutVertex* out, c
         float outc[2][4] = {{1, 1, 1, 1}, {1, 1, 1, 1}};
         for (u32 ch = 0; ch < 2; ch++) {
             if (ch >= numchans) { memcpy(outc[ch], vc[ch], sizeof outc[ch]); continue; }
-            light_channel(xf[0x100E + ch], xf[0x100A + ch], xf[0x100C + ch], vc[ch], ep, en, false, outc[ch]);
-            light_channel(xf[0x1010 + ch], xf[0x100A + ch], xf[0x100C + ch], vc[ch], ep, en, true, outc[ch]);
+            light_comp(lit[ch][0], lights, vc[ch], ep, en, outc[ch]);
+            light_comp(lit[ch][1], lights, vc[ch], ep, en, outc[ch]);
         }
         memcpy(o.col0, outc[0], sizeof o.col0);
         memcpy(o.col1, outc[1], sizeof o.col1);
         // texture coordinate generation
-        for (u32 t = 0; t < 8; t++) {
-            if (t >= numtex) { o.tex[t][0] = o.tex[t][1] = 0; o.tex[t][2] = 1; continue; }
-            u32 info = xf[0x1040 + t];
-            bool stq = (info >> 1) & 1;
-            bool abc1 = (info >> 2) & 1;
-            u32 type = (info >> 4) & 7;
-            u32 row = (info >> 7) & 31;
+        for (u32 t = 0; t < numtex; t++) {
+            const TexGen& g = tg[t];
             float in[4] = {0, 0, 1, 1};
-            switch (row) {
+            switch (g.row) {
             case 0: in[0] = v.pos[0]; in[1] = v.pos[1]; in[2] = v.pos[2]; break;
-            case 1: in[0] = v.nrm[0]; in[1] = v.nrm[1]; in[2] = v.nrm[2]; if (!v.has_nrm) { in[0] = in[1] = 0; in[2] = 1; } break;
+            case 1: if (v.has_nrm) { in[0] = v.nrm[0]; in[1] = v.nrm[1]; in[2] = v.nrm[2]; } else { in[0] = in[1] = 0; in[2] = 1; } break;
             case 2: break;
-            case 3: in[0] = v.tan[0]; in[1] = v.tan[1]; in[2] = v.tan[2]; break;
-            case 4: in[0] = v.bin[0]; in[1] = v.bin[1]; in[2] = v.bin[2]; break;
-            default: if (row >= 5 && row <= 12) { in[0] = v.tex[row - 5][0]; in[1] = v.tex[row - 5][1]; } break;
+            case 3: if (dec.nbt) { in[0] = v.tan[0]; in[1] = v.tan[1]; in[2] = v.tan[2]; } else { in[0] = in[1] = in[2] = 0; } break;
+            case 4: if (dec.nbt) { in[0] = v.bin[0]; in[1] = v.bin[1]; in[2] = v.bin[2]; } else { in[0] = in[1] = in[2] = 0; } break;
+            default: if (g.row >= 5 && g.row <= 12) { in[0] = v.tex[g.row - 5][0]; in[1] = v.tex[g.row - 5][1]; } break;
             }
-            if (!abc1) in[2] = 1.0f;
+            if (!g.abc1) in[2] = 1.0f;
             float r[3] = {0, 0, 1};
-            if (type == 0) {
+            if (g.type == 0) {
                 u32 mb = v.tmidx[t] * 4;
-                if (stq) mul34(mb, in, r);
+                if (g.stq) mul34(mb, in, r);
                 else {
                     for (int k = 0; k < 2; k++)
                         r[k] = xf_float(mb + k * 4) * in[0] + xf_float(mb + k * 4 + 1) * in[1] + xf_float(mb + k * 4 + 2) * in[2] +
                                xf_float(mb + k * 4 + 3) * in[3];
                     r[2] = 1.0f;
                 }
-            } else if (type == 1) {
+            } else if (g.type == 1) {
                 // emboss: offset a previously generated coordinate (approximation: copy source)
-                u32 srcgen = (info >> 12) & 7;
-                if (srcgen < t) { r[0] = o.tex[srcgen][0]; r[1] = o.tex[srcgen][1]; r[2] = o.tex[srcgen][2]; }
+                if (g.srcgen < t) { r[0] = o.tex[g.srcgen][0]; r[1] = o.tex[g.srcgen][1]; r[2] = o.tex[g.srcgen][2]; }
             } else {
                 // color texgen: s,t from the lit channel colour
-                const float* cc = type == 2 ? o.col0 : o.col1;
+                const float* cc = g.type == 2 ? o.col0 : o.col1;
                 r[0] = cc[0]; r[1] = cc[1]; r[2] = 1.0f;
             }
-            if (dualtex && type == 0) {
-                u32 post = xf[0x1050 + t];
-                float q = r[2];
-                if (post & 0x100) normalize3(r);
+            if (dualtex && g.type == 0) {
+                if (g.post_norm) normalize3(r);
                 float in2[4] = {r[0], r[1], r[2], 1.0f};
-                (void)q;
-                mul34(0x500 + (post & 63) * 4, in2, r);
+                mul34(g.post_base, in2, r);
             }
             o.tex[t][0] = r[0]; o.tex[t][1] = r[1]; o.tex[t][2] = r[2];
         }
+        for (u32 t = numtex; t < 8; t++) { o.tex[t][0] = o.tex[t][1] = 0; o.tex[t][2] = 1; }
     }
 }

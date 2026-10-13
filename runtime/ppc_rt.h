@@ -218,8 +218,20 @@ static FORCEINLINE void ppc_mtfsf(CPU* c, u32 fm, u32 v) {
     c->fpscr = (c->fpscr & ~m) | (v & m);
 }
 
-void psq_load(CPU* c, u32 ea, int rd, int w, int qi);
-void psq_store(CPU* c, u32 ea, int rs, int w, int qi);
+// Paired-single quantized load / store.  GQR types 4-7 (u8/u16/s8/s16 with scale) go to the runtime;
+// the common float case (types 0-3) is inline.
+void psq_load_quantized(CPU* c, u32 ea, int rd, int w, int qi);
+void psq_store_quantized(CPU* c, u32 ea, int rs, int w, int qi);
+static FORCEINLINE void psq_load(CPU* c, u32 ea, int rd, int w, int qi) {
+    if (UNLIKELY(c->gqr[qi] & 0x00040000u)) { psq_load_quantized(c, ea, rd, w, qi); return; }
+    c->fpr[rd].d = (double)rdf32(ea);
+    c->ps1[rd] = w ? 1.0 : (double)rdf32(ea + 4);
+}
+static FORCEINLINE void psq_store(CPU* c, u32 ea, int rs, int w, int qi) {
+    if (UNLIKELY(c->gqr[qi] & 4u)) { psq_store_quantized(c, ea, rs, w, qi); return; }
+    wrf32(ea, (float)c->fpr[rs].d);
+    if (!w) wrf32(ea + 4, (float)c->ps1[rs]);
+}
 
 // ---------------------------------------------------------------- runtime services
 void call_indirect(CPU* c, u32 addr);

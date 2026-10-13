@@ -15,3 +15,6 @@ shots/
 *.wav
 *.raw
 crash_ram.bin
+
+# runtime caches
+cache/

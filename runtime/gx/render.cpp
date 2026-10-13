@@ -14,6 +14,7 @@
 #include <d3d11_1.h>
 #include <d3dcompiler.h>
 #include <wincodec.h>
+#include <intrin.h>
 #include <algorithm>
 #include <unordered_map>
 #include <string>
@@ -22,6 +23,7 @@
 
 HWND host_window();
 u32 vi_xfb_address();
+double vi_field_ms();
 
 static const int EFB_W = 640, EFB_H = 528;
 static int EFB_SCALE = 3;
@@ -192,6 +194,9 @@ static void create_backbuffer_view() {
 }
 
 // ---------------------------------------------------------------- init
+static void batch_init();
+static void shader_cache_load();
+
 void gx_render_init() {
     HWND wnd = host_window();
     if (const char* sc = getenv("DD_EFB_SCALE")) EFB_SCALE = atoi(sc) > 0 ? atoi(sc) : 3;
@@ -207,6 +212,13 @@ void gx_render_init() {
     HRESULT hr = D3D11CreateDeviceAndSwapChain(nullptr, D3D_DRIVER_TYPE_HARDWARE, nullptr, 0, &fl, 1, D3D11_SDK_VERSION, &sd,
                                                &s_swap, &s_dev, nullptr, &s_ctx);
     if (FAILED(hr)) { LOG("gx", "D3D11 init failed (%08lX): rendering disabled", hr); return; }
+    {   // queue at most one frame ahead of the GPU: the game is CPU-paced, more only adds input latency
+        IDXGIDevice1* dxgi = nullptr;
+        if (SUCCEEDED(s_dev->QueryInterface(__uuidof(IDXGIDevice1), (void**)&dxgi))) {
+            dxgi->SetMaximumFrameLatency(1);
+            dxgi->Release();
+        }
+    }
     create_backbuffer_view();
     int w = EFB_W * EFB_SCALE, h = EFB_H * EFB_SCALE;
     create_rt(w, h, DXGI_FORMAT_R8G8B8A8_UNORM, &s_efb, &s_efb_rtv, &s_efb_srv);
@@ -262,6 +274,7 @@ void gx_render_init() {
     bd.ByteWidth = VB_VERTS * 3 * sizeof(u32);
     bd.BindFlags = D3D11_BIND_INDEX_BUFFER;
     s_dev->CreateBuffer(&bd, nullptr, &s_ib);
+    batch_init();
     // constant buffers are updated with UpdateSubresource: DEFAULT usage, no CPU access
     bd.ByteWidth = sizeof(PSConstants); bd.BindFlags = D3D11_BIND_CONSTANT_BUFFER;
     bd.Usage = D3D11_USAGE_DEFAULT; bd.CPUAccessFlags = 0;
@@ -280,6 +293,7 @@ void gx_render_init() {
     s_ctx->ClearDepthStencilView(s_dsv, D3D11_CLEAR_DEPTH, 1.0f, 0);
     s_ok = true;
     LOG("gx", "D3D11 renderer ready, EFB %dx%d", w, h);
+    shader_cache_load();
 }
 
 // ---------------------------------------------------------------- state objects
@@ -289,13 +303,101 @@ static std::unordered_map<u32, ID3D11DepthStencilState*> s_depth_cache;
 static std::unordered_map<u32, ID3D11RasterizerState*> s_rast_cache;
 static std::unordered_map<u64, ID3D11SamplerState*> s_sampler_cache;
 
+// hitch diagnostics: work done since the last game frame that can stall it
+static u32 s_hitch_shaders, s_hitch_textures;
+static double s_hitch_shader_ms, s_hitch_texture_ms;
+static u32 s_repeats;   // VI fields that showed the same game frame as the field before, since the last report
+static double qpc_ms() {
+    static LARGE_INTEGER f;
+    if (!f.QuadPart) QueryPerformanceFrequency(&f);
+    LARGE_INTEGER t;
+    QueryPerformanceCounter(&t);
+    return (double)t.QuadPart * 1000.0 / (double)f.QuadPart;
+}
+
+// ---------------------------------------------------------------- pixel shader disk cache
+// Compiling a TEV shader takes milliseconds, so a new effect would stall its first frame.  Compiled
+// bytecode is appended to cache/shaders.bin and loaded at startup.  Each record carries a hash of the
+// generated HLSL: records whose source no longer matches (shader generator changed) are ignored.
+static const char* SHADER_CACHE = "cache/shaders.bin";
+static const u32 SHADER_CACHE_MAGIC = 0x43534444;   // "DDSC"
+static FILE* s_shader_cache_out;
+static u64 hash_mem(const u8* p, size_t n);
+
+static void shader_cache_load() {
+    if (getenv("DD_NO_SHADER_CACHE")) return;
+    CreateDirectoryA("cache", nullptr);
+    u32 loaded = 0, stale = 0;
+    double t0 = qpc_ms();
+    struct Rec { ShaderKey k; u64 h; std::vector<u8> code; };
+    std::vector<Rec> valid;
+    if (FILE* f = fopen(SHADER_CACHE, "rb")) {
+        u32 magic = 0, key_size = 0;
+        if (fread(&magic, 4, 1, f) == 1 && fread(&key_size, 4, 1, f) == 1 && magic == SHADER_CACHE_MAGIC &&
+            key_size == sizeof(ShaderKey)) {
+            for (;;) {
+                ShaderKey k;
+                u64 src_hash;
+                u32 n;
+                if (fread(&k, sizeof k, 1, f) != 1 || fread(&src_hash, 8, 1, f) != 1 || fread(&n, 4, 1, f) != 1 || n > (1u << 20))
+                    break;
+                std::vector<u8> code(n);
+                if (fread(code.data(), 1, n, f) != n) break;
+                std::string src = gx_shader_source(k);
+                if (hash_mem((const u8*)src.data(), src.size()) != src_hash || s_ps_cache.count(k)) { stale++; continue; }
+                ID3D11PixelShader* ps = nullptr;
+                if (FAILED(s_dev->CreatePixelShader(code.data(), n, nullptr, &ps))) { stale++; continue; }
+                s_ps_cache[k] = ps;
+                loaded++;
+                valid.push_back({k, src_hash, std::move(code)});
+            }
+        }
+        fclose(f);
+    }
+    // a missing / foreign file, or outdated records: start a fresh file with the valid records
+    s_shader_cache_out = fopen(SHADER_CACHE, "ab");
+    if (s_shader_cache_out && (stale || ftell(s_shader_cache_out) == 0 || !loaded)) {
+        fclose(s_shader_cache_out);
+        s_shader_cache_out = fopen(SHADER_CACHE, "wb");
+        if (s_shader_cache_out) {
+            fwrite(&SHADER_CACHE_MAGIC, 4, 1, s_shader_cache_out);
+            u32 ks = sizeof(ShaderKey);
+            fwrite(&ks, 4, 1, s_shader_cache_out);
+            for (const Rec& r : valid) {
+                u32 n = (u32)r.code.size();
+                fwrite(&r.k, sizeof r.k, 1, s_shader_cache_out);
+                fwrite(&r.h, 8, 1, s_shader_cache_out);
+                fwrite(&n, 4, 1, s_shader_cache_out);
+                fwrite(r.code.data(), 1, n, s_shader_cache_out);
+            }
+            fflush(s_shader_cache_out);
+        }
+    }
+    LOG("gx", "shader cache: %u shaders loaded in %.0f ms%s", loaded, qpc_ms() - t0,
+        stale ? ", outdated records dropped" : "");
+}
+
+static void shader_cache_store(const ShaderKey& k, const std::string& src, ID3DBlob* b) {
+    if (!s_shader_cache_out) return;
+    u64 h = hash_mem((const u8*)src.data(), src.size());
+    u32 n = (u32)b->GetBufferSize();
+    fwrite(&k, sizeof k, 1, s_shader_cache_out);
+    fwrite(&h, 8, 1, s_shader_cache_out);
+    fwrite(&n, 4, 1, s_shader_cache_out);
+    fwrite(b->GetBufferPointer(), 1, n, s_shader_cache_out);
+    fflush(s_shader_cache_out);
+}
+
 static ID3D11PixelShader* get_ps(const ShaderKey& k) {
     auto it = s_ps_cache.find(k);
     if (it != s_ps_cache.end()) return it->second;
+    double t0 = qpc_ms();
+    struct Timed { double t0; ~Timed() { s_hitch_shaders++; s_hitch_shader_ms += qpc_ms() - t0; } } timed{t0};
     std::string src = gx_shader_source(k);
     ID3D11PixelShader* ps = nullptr;
     if (ID3DBlob* b = compile(src, "main", "ps_5_0")) {
-        s_dev->CreatePixelShader(b->GetBufferPointer(), b->GetBufferSize(), nullptr, &ps);
+        if (SUCCEEDED(s_dev->CreatePixelShader(b->GetBufferPointer(), b->GetBufferSize(), nullptr, &ps)))
+            shader_cache_store(k, src, b);
         b->Release();
     }
     s_ps_cache[k] = ps;
@@ -467,6 +569,9 @@ struct EfbCopy {
     bool depth = false;     // copied from the depth buffer
     u64 mem_hash = 0;       // RAM contents at copy time: a CPU overwrite invalidates the copy
     u32 bytes = 0;
+    u32 validated_frame = ~0u;   // mem_hash last checked in this game frame
+    u32 frame = 0;               // XFB copies: game frame number
+    bool stale = false;          // the CPU overwrote the copy's RAM: use the texture data instead
 };
 static std::unordered_map<u64, TexEntry> s_tex_cache;
 static std::unordered_map<u32, EfbCopy> s_efb_copies;   // texture copies by physical address
@@ -498,8 +603,12 @@ static ID3D11ShaderResourceView* get_texture(u32 map, u32* out_w, u32* out_h) {
     auto ec = s_efb_copies.find(addr);
     if (ec != s_efb_copies.end()) {
         EfbCopy& c = ec->second;
-        if (c.w == w && c.h == h) {
-            if (hash_mem(host_ptr(addr), c.bytes) == c.mem_hash) {
+        if (c.w == w && c.h == h && !c.stale) {
+            if (c.validated_frame != s_frame) {   // check for a CPU overwrite once per frame
+                c.validated_frame = s_frame;
+                c.stale = hash_mem(host_ptr(addr), c.bytes) != c.mem_hash;
+            }
+            if (!c.stale) {
                 static int logged;
                 if (logged < 40 && s_fields > 3000) {
                     logged++;
@@ -535,6 +644,7 @@ static ID3D11ShaderResourceView* get_texture(u32 map, u32* out_w, u32* out_h) {
     if (e.srv && hh == e.hash) return e.srv;
     if (e.srv) { e.srv->Release(); e.tex->Release(); e.srv = nullptr; e.tex = nullptr; }
     e.hash = hh;
+    struct Timed { double t0 = qpc_ms(); ~Timed() { s_hitch_textures++; s_hitch_texture_ms += qpc_ms() - t0; } } timed;
     D3D11_TEXTURE2D_DESC d = {};
     d.Width = w; d.Height = h; d.MipLevels = levels; d.ArraySize = 1; d.Format = DXGI_FORMAT_R8G8B8A8_UNORM;
     d.SampleDesc.Count = 1; d.Usage = D3D11_USAGE_IMMUTABLE; d.BindFlags = D3D11_BIND_SHADER_RESOURCE;
@@ -570,9 +680,8 @@ static inline s32 s11(u32 v) { return (s32)(v << 21) >> 21; }
 
 void gx_on_bp(u32 reg, u32 old, u32 val);
 
-static void apply_viewport_scissor() {
-    D3D11_VIEWPORT vp = {0, 0, (float)(EFB_W * EFB_SCALE), (float)(EFB_H * EFB_SCALE), 0.0f, 1.0f};
-    s_ctx->RSSetViewports(1, &vp);
+// GX scissor (BP 0x20/0x21, offset 0x59) in EFB render-target pixels
+static D3D11_RECT scissor_rect() {
     u32 tl = g_gx.bp[0x20], br = g_gx.bp[0x21], off = g_gx.bp[0x59];
     int xo = (int)(off & 0x3FF) * 2, yo = (int)((off >> 10) & 0x3FF) * 2;
     int x0 = (int)((tl >> 12) & 0x7FF) - xo, y0 = (int)(tl & 0x7FF) - yo;
@@ -580,35 +689,125 @@ static void apply_viewport_scissor() {
     x0 = std::max(0, x0); y0 = std::max(0, y0); x1 = std::min(EFB_W, x1); y1 = std::min(EFB_H, y1);
     if (x1 < x0) x1 = x0;
     if (y1 < y0) y1 = y0;
-    D3D11_RECT r = {x0 * EFB_SCALE, y0 * EFB_SCALE, x1 * EFB_SCALE, y1 * EFB_SCALE};
-    s_ctx->RSSetScissorRects(1, &r);
+    return D3D11_RECT{x0 * EFB_SCALE, y0 * EFB_SCALE, x1 * EFB_SCALE, y1 * EFB_SCALE};
 }
 
-static std::vector<GxOutVertex> s_verts;
-static std::vector<u32> s_indices;
+static std::vector<GxOutVertex> s_verts;   // scratch for lines / points (expanded into quads)
 
-static void build_indices(u32 prim, u32 n, u32 base) {
-    s_indices.clear();
+// ---------------------------------------------------------------- draw batching
+// Consecutive draws with identical pixel-pipeline state are merged into one DrawIndexed.  Vertices are
+// transformed on the CPU, so only BP registers (and the viewport, for range fog) affect that state:
+// gx_on_bp / gx_on_xf clear s_state_valid, and the state is recomputed (and compared) only then.
+struct GxDrawState {
+    ID3D11PixelShader* ps;
+    ID3D11BlendState* blend;
+    ID3D11DepthStencilState* depth;
+    ID3D11RasterizerState* rast;
+    ID3D11ShaderResourceView* srv[8];
+    ID3D11SamplerState* smp[8];
+    D3D11_RECT scissor;
+    PSConstants cb;
+};
+static const u32 BATCH_VERTS = 65536;
+static GxOutVertex* s_bverts;            // [BATCH_VERTS]
+static u32* s_bidx;                      // [BATCH_VERTS * 3]
+static u32 s_bn_verts, s_bn_idx;
+static GxDrawState s_batch;                // state of the draws in the open batch
+static bool s_state_valid;               // s_batch matches the current GX registers
+static bool s_state_tri;                 // ... for triangles (true) or expanded lines/points
+static bool s_bind_dirty = true;         // something other than gx_draw changed the D3D pipeline bindings
+static GxDrawState s_bound;                // what the last batch bound
+static u32 s_batches_this_field;
+
+static void batch_init() {
+    s_bverts = new GxOutVertex[BATCH_VERTS];
+    s_bidx = new u32[BATCH_VERTS * 3];
+}
+
+static u32 build_indices(u32 prim, u32 n, u32 base, u32* out) {
+    u32* o = out;
     switch (prim) {
     case 0: case 1:   // quads
         for (u32 i = 0; i + 3 < n; i += 4) {
             u32 a = base + i;
-            s_indices.insert(s_indices.end(), {a, a + 1, a + 2, a, a + 2, a + 3});
+            o[0] = a; o[1] = a + 1; o[2] = a + 2; o[3] = a; o[4] = a + 2; o[5] = a + 3; o += 6;
         }
         break;
     case 2:           // triangles
-        for (u32 i = 0; i + 2 < n; i += 3) s_indices.insert(s_indices.end(), {base + i, base + i + 1, base + i + 2});
+        for (u32 i = 0; i + 2 < n; i += 3) { o[0] = base + i; o[1] = base + i + 1; o[2] = base + i + 2; o += 3; }
         break;
     case 3:           // strip
         for (u32 i = 0; i + 2 < n; i++) {
-            if (i & 1) s_indices.insert(s_indices.end(), {base + i + 1, base + i, base + i + 2});
-            else s_indices.insert(s_indices.end(), {base + i, base + i + 1, base + i + 2});
+            u32 a = base + i;
+            if (i & 1) { o[0] = a + 1; o[1] = a; } else { o[0] = a; o[1] = a + 1; }
+            o[2] = a + 2; o += 3;
         }
         break;
     case 4:           // fan
-        for (u32 i = 1; i + 1 < n; i++) s_indices.insert(s_indices.end(), {base, base + i, base + i + 1});
+        for (u32 i = 1; i + 1 < n; i++) { o[0] = base; o[1] = base + i; o[2] = base + i + 1; o += 3; }
         break;
     }
+    return (u32)(o - out);
+}
+
+static void bind_state(const GxDrawState& st) {
+    bool all = s_bind_dirty;
+    if (all) {
+        UINT stride = sizeof(GxOutVertex), voff = 0;
+        s_ctx->IASetVertexBuffers(0, 1, &s_vb, &stride, &voff);
+        s_ctx->IASetIndexBuffer(s_ib, DXGI_FORMAT_R32_UINT, 0);
+        s_ctx->IASetInputLayout(s_layout);
+        s_ctx->IASetPrimitiveTopology(D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
+        s_ctx->VSSetShader(s_vs, nullptr, 0);
+        s_ctx->PSSetConstantBuffers(0, 1, &s_ps_cb);
+        s_ctx->OMSetRenderTargets(1, &s_efb_rtv, s_dsv);
+        D3D11_VIEWPORT vp = {0, 0, (float)(EFB_W * EFB_SCALE), (float)(EFB_H * EFB_SCALE), 0.0f, 1.0f};
+        s_ctx->RSSetViewports(1, &vp);
+        s_bind_dirty = false;
+    }
+    static bool s_cb_valid;
+    if (!s_cb_valid || memcmp(&st.cb, &s_bound.cb, sizeof st.cb) != 0) {   // most batches share constants
+        s_ctx->UpdateSubresource(s_ps_cb, 0, nullptr, &st.cb, 0, 0);
+        s_cb_valid = true;
+    }
+    if (all || st.ps != s_bound.ps) s_ctx->PSSetShader(st.ps, nullptr, 0);
+    if (all || memcmp(st.srv, s_bound.srv, sizeof st.srv)) s_ctx->PSSetShaderResources(0, 8, st.srv);
+    if (all || memcmp(st.smp, s_bound.smp, sizeof st.smp)) s_ctx->PSSetSamplers(0, 8, st.smp);
+    if (all || st.blend != s_bound.blend) {
+        float bf[4] = {0, 0, 0, 0};
+        s_ctx->OMSetBlendState(st.blend, bf, 0xFFFFFFFF);
+    }
+    if (all || st.depth != s_bound.depth) s_ctx->OMSetDepthStencilState(st.depth, 0);
+    if (all || st.rast != s_bound.rast) s_ctx->RSSetState(st.rast);
+    if (all || memcmp(&st.scissor, &s_bound.scissor, sizeof st.scissor)) s_ctx->RSSetScissorRects(1, &st.scissor);
+    memcpy(&s_bound, &st, sizeof st);
+}
+
+// submit the open batch
+static void flush_batch() {
+    if (!s_bn_idx) { s_bn_verts = 0; return; }
+    D3D11_MAPPED_SUBRESOURCE m;
+    // vertex and index rings: append without synchronisation, discard only when they wrap
+    if (s_vb_pos + s_bn_verts > VB_VERTS) s_vb_pos = 0;
+    D3D11_MAP mode = s_vb_pos == 0 ? D3D11_MAP_WRITE_DISCARD : D3D11_MAP_WRITE_NO_OVERWRITE;
+    static u32 s_ib_pos;
+    const u32 ib_cap = VB_VERTS * 3;
+    D3D11_MAP imode = D3D11_MAP_WRITE_NO_OVERWRITE;
+    if (s_ib_pos + s_bn_idx > ib_cap) { s_ib_pos = 0; imode = D3D11_MAP_WRITE_DISCARD; }
+    if (SUCCEEDED(s_ctx->Map(s_vb, 0, mode, 0, &m))) {
+        memcpy((GxOutVertex*)m.pData + s_vb_pos, s_bverts, s_bn_verts * sizeof(GxOutVertex));
+        s_ctx->Unmap(s_vb, 0);
+        if (SUCCEEDED(s_ctx->Map(s_ib, 0, imode, 0, &m))) {
+            memcpy((u32*)m.pData + s_ib_pos, s_bidx, s_bn_idx * 4);
+            s_ctx->Unmap(s_ib, 0);
+            bind_state(s_batch);
+            s_ctx->DrawIndexed(s_bn_idx, s_ib_pos, (INT)s_vb_pos);
+            s_batches_this_field++;
+            s_ib_pos += s_bn_idx;
+        }
+        s_vb_pos += s_bn_verts;
+    }
+    s_bn_verts = s_bn_idx = 0;
 }
 
 // lines and points become screen-aligned quads
@@ -649,7 +848,9 @@ static void expand_lines_points(u32 prim, std::vector<GxOutVertex>& v) {
 // Debug: watch the centre depth sample and report every transition between "far" and "near".
 static float xf_f(u32 a) { float f; memcpy(&f, &g_gx.xfmem[a], 4); return f; }
 static bool s_probe_draws;   // per-draw depth probing armed (after a copy+clear in the debug window)
+static const GxOutVertex* s_last_draw_verts;   // vertices of the most recent draw (debug dumps)
 static void depth_probe(const char* what, u32 prim, u32 count) {
+    flush_batch();
     static ID3D11Texture2D* probe;
     static float last = 1.0f;
     static int reports;
@@ -676,7 +877,8 @@ static void depth_probe(const char* what, u32 prim, u32 count) {
         if (s_probe_draws && z < 0.9f && !strcmp(what, "draw")) {
             s_probe_draws = false;
             for (u32 i = 0; i < count && i < 24; i++)
-                LOG("gxprobe", "  v%u pos=(%.3f %.3f %.5f %.3f)", i, s_verts[i].pos[0], s_verts[i].pos[1], s_verts[i].pos[2], s_verts[i].pos[3]);
+                LOG("gxprobe", "  v%u pos=(%.3f %.3f %.5f %.3f)", i, s_last_draw_verts[i].pos[0], s_last_draw_verts[i].pos[1],
+                    s_last_draw_verts[i].pos[2], s_last_draw_verts[i].pos[3]);
             LOG("gxprobe", "  vcd=%08X/%08X genmode=%08X proj %g %g %g %g %g %g vp %g %g %g %g %g %g", g_gx.vcd_lo, g_gx.vcd_hi, g_gx.bp[0],
                 xf_f(0x1020), xf_f(0x1021), xf_f(0x1022), xf_f(0x1023), xf_f(0x1024), xf_f(0x1025),
                 xf_f(0x101A), xf_f(0x101B), xf_f(0x101C), xf_f(0x101D), xf_f(0x101E), xf_f(0x101F));
@@ -693,151 +895,21 @@ static void depth_probe(const char* what, u32 prim, u32 count) {
     last = z;
 }
 
+// profiling counters (__rdtsc ticks; converted to ms in gx_on_retrace)
 u64 g_prof_draw_ticks, g_prof_xform_ticks;
-struct ProfScope { u64& acc; LARGE_INTEGER t0; ProfScope(u64& a) : acc(a) { QueryPerformanceCounter(&t0); }
-    ~ProfScope() { LARGE_INTEGER t1; QueryPerformanceCounter(&t1); acc += t1.QuadPart - t0.QuadPart; } };
-void gx_draw(u32 prim, u32 vat, u32 count, const u8* data) {
-    ProfScope prof_(g_prof_draw_ticks);
-    s_draws_this_field++;
-    if (!s_ok) return;
-    u32 cull = (g_gx.bp[0x00] >> 14) & 3;
-    bool tri = prim <= 4;
-    if (tri && cull == 3) return;
-    s_verts.resize(count);
-    GxFrameTransform ft;
-    ft.inv_efb_w = 1.0f / EFB_W;
-    ft.inv_efb_h = 1.0f / EFB_H;
-    { ProfScope px_(g_prof_xform_ticks); gx_process_vertices(vat, count, data, s_verts.data(), ft); }
-    if (dbg_field && s_fields == dbg_field && s_draws_this_field <= 40) {
-        auto xff = [](u32 a) { float f; memcpy(&f, &g_gx.xfmem[a], 4); return f; };
-        LOG("gxdbg", "draw prim=%u vat=%u n=%u vcd=%08X/%08X vat=%08X/%08X/%08X genmode=%08X", prim, vat, count, g_gx.vcd_lo,
-            g_gx.vcd_hi, g_gx.vat_a[vat], g_gx.vat_b[vat], g_gx.vat_c[vat], g_gx.bp[0]);
-        LOG("gxdbg", "  vp %.1f %.1f %.1f | %.1f %.1f %.1f  proj %.3f %.3f %.3f %.3f %.3f %.3f type=%u",
-            xff(0x101A), xff(0x101B), xff(0x101C), xff(0x101D), xff(0x101E), xff(0x101F), xff(0x1020), xff(0x1021),
-            xff(0x1022), xff(0x1023), xff(0x1024), xff(0x1025), g_gx.xfmem[0x1026]);
-        for (u32 i = 0; i < std::min(count, 3u); i++)
-            LOG("gxdbg", "  v%u clip=(%.2f %.2f %.3f %.2f) col0=(%.2f %.2f %.2f %.2f) tc0=(%.3f %.3f %.3f)", i, s_verts[i].pos[0],
-                s_verts[i].pos[1], s_verts[i].pos[2], s_verts[i].pos[3], s_verts[i].col0[0], s_verts[i].col0[1],
-                s_verts[i].col0[2], s_verts[i].col0[3], s_verts[i].tex[0][0], s_verts[i].tex[0][1], s_verts[i].tex[0][2]);
-        LOG("gxdbg", "  zmode=%08X cmode0=%08X scis=%08X/%08X off=%08X tev0=%08X/%08X tref=%08X", g_gx.bp[0x40], g_gx.bp[0x41],
-            g_gx.bp[0x20], g_gx.bp[0x21], g_gx.bp[0x59], g_gx.bp[0xC0], g_gx.bp[0xC1], g_gx.bp[0x28]);
-    }
-    if (dbg_field && s_fields == dbg_field) {   // whole-field visibility statistics
-        static u32 st_draws, st_behind, st_zout, st_xyout, st_persp, st_ztest;
-        st_draws++;
-        if (!g_gx.xfmem[0x1026]) st_persp++;
-        if (g_gx.bp[0x40] & 1) st_ztest++;
-        bool behind = true, zout = true, xyout = true;
-        for (u32 i = 0; i < count; i++) {
-            const float* p = s_verts[i].pos;
-            if (p[3] > 0) behind = false;
-            if (p[2] >= 0 && p[2] <= p[3]) zout = false;
-            if (fabsf(p[0]) <= fabsf(p[3]) && fabsf(p[1]) <= fabsf(p[3])) xyout = false;
-        }
-        st_behind += behind; st_zout += zout; st_xyout += xyout;
-        bool big = false;
-        for (u32 i = 0; i + 1 < count && !big; i++) {
-            const float* p = s_verts[i].pos;
-            const float* q = s_verts[i + 1].pos;
-            if (p[3] > 0 && q[3] > 0 && fabsf(p[0] / p[3] - q[0] / q[3]) > 0.8f) big = true;
-        }
-        bool nearz = false;
-        if (g_gx.bp[0x40] & 0x10)
-            for (u32 i = 0; i < count; i++) {
-                const float* p = s_verts[i].pos;
-                if (p[3] > 0 && p[2] / p[3] < 0.9f) nearz = true;
-            }
-        static u32 st_near;
-        if (nearz && st_near++ >= 40) nearz = false;
-        if (big || nearz || ((g_gx.bp[0x40] & 0x10) && st_draws <= 3)) {   // screen-covering / near-depth draws
-            float zmin = 9, zmax = -9, xmin = 9, xmax = -9, ymin = 9, ymax = -9;
-            for (u32 i = 0; i < count; i++) {
-                const float* p = s_verts[i].pos;
-                if (p[3] <= 0) continue;
-                zmin = std::min(zmin, p[2] / p[3]); zmax = std::max(zmax, p[2] / p[3]);
-                xmin = std::min(xmin, p[0] / p[3]); xmax = std::max(xmax, p[0] / p[3]);
-                ymin = std::min(ymin, p[1] / p[3]); ymax = std::max(ymax, p[1] / p[3]);
-            }
-            LOG("gxz", "#%u big=%d near=%d zmode=%02X persp=%d n=%u z=[%.5f %.5f] x=[%.2f %.2f] y=[%.2f %.2f] vp z %.0f/%.0f proj4/5 %g %g cm0=%04X",
-                st_draws, (int)big, (int)nearz, g_gx.bp[0x40] & 0xFF, !g_gx.xfmem[0x1026], count, zmin, zmax, xmin, xmax, ymin, ymax,
-                [] { float f; memcpy(&f, &g_gx.xfmem[0x101C], 4); return f; }(),
-                [] { float f; memcpy(&f, &g_gx.xfmem[0x101F], 4); return f; }(),
-                [] { float f; memcpy(&f, &g_gx.xfmem[0x1024], 4); return f; }(),
-                [] { float f; memcpy(&f, &g_gx.xfmem[0x1025], 4); return f; }(), g_gx.bp[0x41] & 0xFFFF);
-            if (big)
-                LOG("gxz", "   stages=%u tev0=%06X/%06X tev1=%06X/%06X order=%06X ksel=%06X k0=%d,%d,%d,%d reg0=%d,%d,%d,%d img0=%06X img3=%06X",
-                    ((g_gx.bp[0] >> 10) & 15) + 1, g_gx.bp[0xC0] & 0xFFFFFF, g_gx.bp[0xC1] & 0xFFFFFF, g_gx.bp[0xC2] & 0xFFFFFF,
-                    g_gx.bp[0xC3] & 0xFFFFFF, g_gx.bp[0x28] & 0xFFFFFF, g_gx.bp[0xF6] & 0xFFFFFF, s_tev_k[0][0], s_tev_k[0][1],
-                    s_tev_k[0][2], s_tev_k[0][3], s_tev_reg[1][0], s_tev_reg[1][1], s_tev_reg[1][2], s_tev_reg[1][3],
-                    g_gx.bp[0x88] & 0xFFFFFF, g_gx.bp[0x94] & 0xFFFFFF);
-        }
-        if (st_draws % 500 == 0 || s_draws_this_field == 1)
-            LOG("gxstat", "draws=%u persp=%u ztest=%u all-behind=%u z-out=%u xy-out=%u zclear=%06X", st_draws, st_persp,
-                st_ztest, st_behind, st_zout, st_xyout, g_gx.bp[0x51] & 0xFFFFFF);
-    }
-    if ((dbg_flags & 0x30) && g_gx.xfmem[0x1026] && (g_gx.bp[0x41] & 1) && count == 4) {
-        // 0x10: skip 1-stage blended screen quads, 0x20: skip multi-stage ones (post-effect debugging)
-        u32 stages = ((g_gx.bp[0] >> 10) & 15) + 1;
-        if (((dbg_flags & 0x10) && stages == 1) || ((dbg_flags & 0x20) && stages > 1)) {
-            const float* a = s_verts[0].pos;
-            const float* b = s_verts[2].pos;
-            if (fabsf(a[0] - b[0]) > 1.5f) return;
-        }
-    }
-    if (!tri) { expand_lines_points(prim, s_verts); prim = 0; count = (u32)s_verts.size(); }
-    if (count == 0) return;
-    if (count > VB_VERTS) return;
-    // upload vertices
-    D3D11_MAPPED_SUBRESOURCE m;
-    if (s_vb_pos + count > VB_VERTS) s_vb_pos = 0;
-    D3D11_MAP mode = s_vb_pos == 0 ? D3D11_MAP_WRITE_DISCARD : D3D11_MAP_WRITE_NO_OVERWRITE;
-    if (FAILED(s_ctx->Map(s_vb, 0, mode, 0, &m))) return;
-    memcpy((GxOutVertex*)m.pData + s_vb_pos, s_verts.data(), count * sizeof(GxOutVertex));
-    s_ctx->Unmap(s_vb, 0);
-    build_indices(prim, count, s_vb_pos);
-    {   // debug: large alpha-blended layers anywhere in the race (screen area of triangles in front of the camera)
-        static const bool area_dbg = getenv("DD_DBG_AREA") != nullptr;
-        static int area_logged;
-        if (area_dbg && (g_gx.bp[0x41] & 1) && area_logged < 60 && s_fields > 3000) {
-            double area = 0;
-            for (size_t t = 0; t + 2 < s_indices.size(); t += 3) {
-                const float* a = s_verts[s_indices[t] - s_vb_pos].pos;
-                const float* b = s_verts[s_indices[t + 1] - s_vb_pos].pos;
-                const float* d = s_verts[s_indices[t + 2] - s_vb_pos].pos;
-                if (a[3] <= 0 || b[3] <= 0 || d[3] <= 0) continue;
-                auto cl = [](float v) { return v < -1 ? -1.0f : v > 1 ? 1.0f : v; };
-                float ax = cl(a[0] / a[3]), ay = cl(a[1] / a[3]), bx = cl(b[0] / b[3]), by = cl(b[1] / b[3]), dx = cl(d[0] / d[3]), dy = cl(d[1] / d[3]);
-                area += fabs((bx - ax) * (dy - ay) - (dx - ax) * (by - ay)) * 0.5;
-            }
-            if (area > 0.8) {
-                area_logged++;
-                LOG("gxarea", "field %u draw %u area=%.2f n=%u persp=%d zmode=%02X cm0=%04X stages=%u tev0=%06X/%06X order=%06X k0=%d,%d,%d,%d reg1=%d,%d,%d,%d img0=%06X fog=%06X",
-                    s_fields, s_draws_this_field, area, count, !g_gx.xfmem[0x1026], g_gx.bp[0x40] & 0xFF, g_gx.bp[0x41] & 0xFFFF,
-                    ((g_gx.bp[0] >> 10) & 15) + 1, g_gx.bp[0xC0] & 0xFFFFFF, g_gx.bp[0xC1] & 0xFFFFFF, g_gx.bp[0x28] & 0xFFFFFF,
-                    s_tev_k[0][0], s_tev_k[0][1], s_tev_k[0][2], s_tev_k[0][3], s_tev_reg[1][0], s_tev_reg[1][1], s_tev_reg[1][2],
-                    s_tev_reg[1][3], g_gx.bp[0x88] & 0xFFFFFF, g_gx.bp[0xF1] & 0xFFFFFF);
-            }
-        }
-    }
-    s_vb_pos += count;
-    if (s_indices.empty()) return;
-    // index ring buffer: append without synchronisation, discard only when it wraps
-    static u32 s_ib_pos;
-    const u32 ib_cap = VB_VERTS * 3, nidx = (u32)s_indices.size();
-    if (nidx > ib_cap) return;
-    D3D11_MAP imode = D3D11_MAP_WRITE_NO_OVERWRITE;
-    if (s_ib_pos + nidx > ib_cap) { s_ib_pos = 0; imode = D3D11_MAP_WRITE_DISCARD; }
-    if (FAILED(s_ctx->Map(s_ib, 0, imode, 0, &m))) return;
-    memcpy((u32*)m.pData + s_ib_pos, s_indices.data(), nidx * 4);
-    s_ctx->Unmap(s_ib, 0);
-    const u32 ib_start = s_ib_pos;
-    s_ib_pos += nidx;
+struct ProfScope { u64& acc; u64 t0; ProfScope(u64& a) : acc(a), t0(__rdtsc()) {}
+    ~ProfScope() { acc += __rdtsc() - t0; } };
 
-    // pixel shader + constants
+// pixel-pipeline state for the current GX registers; false if the draw cannot be rendered
+static bool compute_state(GxDrawState& st, bool tri, u32 cull) {
+    memset(&st, 0, sizeof st);   // memcmp'd: padding must be zero too
+    static ShaderKey s_last_key;
+    static ID3D11PixelShader* s_last_ps;
     ShaderKey key = gx_shader_key();
-    ID3D11PixelShader* ps = get_ps(key);
-    if (!ps) return;
-    PSConstants cb = {};
+    if (s_last_ps && key == s_last_key) st.ps = s_last_ps;
+    else { st.ps = get_ps(key); s_last_key = key; s_last_ps = st.ps; }
+    if (!st.ps) return false;
+    PSConstants& cb = st.cb;
     memcpy(cb.reg, s_tev_reg, sizeof cb.reg);
     memcpy(cb.k, s_tev_k, sizeof cb.k);
     u32 ac = g_gx.bp[0xF3];
@@ -891,45 +963,163 @@ void gx_draw(u32 prim, u32 vat, u32 count, const u8* data) {
         }
     }
     // textures used by this shader
-    ID3D11ShaderResourceView* srv[8] = {};
-    ID3D11SamplerState* smp[8] = {};
     u32 used = 0;
     for (u32 s = 0; s < key.num_stages; s++) if ((key.order[s] >> 6) & 1) used |= 1u << (key.order[s] & 7);
     for (u32 n = 0; n < key.num_ind; n++) used |= 1u << ((key.ind_order >> (6 * n)) & 7);
     for (u32 t = 0; t < 8; t++) {
         if (!(used & (1u << t))) continue;
         u32 tw = 1, th = 1;
-        srv[t] = get_texture(t, &tw, &th);
-        smp[t] = get_sampler(tex_reg(0x80, 0xA0, t), tex_reg(0x84, 0xA4, t));
+        st.srv[t] = get_texture(t, &tw, &th);
+        st.smp[t] = get_sampler(tex_reg(0x80, 0xA0, t), tex_reg(0x84, 0xA4, t));
         cb.texdim[t][0] = (float)tw; cb.texdim[t][1] = (float)th;
         cb.texdim[t][2] = 1.0f / tw; cb.texdim[t][3] = 1.0f / th;
     }
-    static PSConstants s_last_cb;
-    static bool s_cb_valid;
-    if (!s_cb_valid || memcmp(&cb, &s_last_cb, sizeof cb) != 0) {   // most consecutive draws share constants
-        s_ctx->UpdateSubresource(s_ps_cb, 0, nullptr, &cb, 0, 0);
-        s_last_cb = cb;
-        s_cb_valid = true;
-    }
-
-    UINT stride = sizeof(GxOutVertex), voff = 0;
-    s_ctx->IASetVertexBuffers(0, 1, &s_vb, &stride, &voff);
-    s_ctx->IASetIndexBuffer(s_ib, DXGI_FORMAT_R32_UINT, 0);
-    s_ctx->IASetInputLayout(s_layout);
-    s_ctx->IASetPrimitiveTopology(D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
-    s_ctx->VSSetShader(s_vs, nullptr, 0);
-    s_ctx->PSSetShader(ps, nullptr, 0);
-    s_ctx->PSSetConstantBuffers(0, 1, &s_ps_cb);
-    s_ctx->PSSetShaderResources(0, 8, srv);
-    s_ctx->PSSetSamplers(0, 8, smp);
-    float bf[4] = {0, 0, 0, 0};
-    s_ctx->OMSetBlendState(get_blend(), bf, 0xFFFFFFFF);
+    st.blend = get_blend();
     // DD_DBG_FLAGS: 1 = disable culling, 2 = disable depth test, 4 = never write depth (renderer debugging)
-    s_ctx->OMSetDepthStencilState((dbg_flags & 2) ? get_depth_always() : get_depth((dbg_flags & 4) != 0), 0);
-    s_ctx->RSSetState(get_rast(tri && !(dbg_flags & 1) ? cull : 0));
-    s_ctx->OMSetRenderTargets(1, &s_efb_rtv, s_dsv);
-    apply_viewport_scissor();
-    s_ctx->DrawIndexed(nidx, ib_start, 0);
+    st.depth = (dbg_flags & 2) ? get_depth_always() : get_depth((dbg_flags & 4) != 0);
+    st.rast = get_rast(tri && !(dbg_flags & 1) ? cull : 0);
+    st.scissor = scissor_rect();
+    return true;
+}
+
+void gx_draw(u32 prim, u32 vat, u32 count, const u8* data) {
+    ProfScope prof_(g_prof_draw_ticks);
+    s_draws_this_field++;
+    if (!s_ok || count == 0) return;
+    u32 cull = (g_gx.bp[0x00] >> 14) & 3;
+    bool tri = prim <= 4;
+    if (tri && cull == 3) return;
+    u32 nout = tri ? count : count * 4;   // lines / points: at most one quad per vertex
+    if (nout > BATCH_VERTS) return;
+    if (!s_state_valid || tri != s_state_tri) {
+        GxDrawState st;
+        if (!compute_state(st, tri, cull)) return;
+        if (memcmp(&st, &s_batch, sizeof st) != 0) {
+            flush_batch();
+            memcpy(&s_batch, &st, sizeof st);
+        }
+        s_state_valid = true;
+        s_state_tri = tri;
+    }
+    if (s_bn_verts + nout > BATCH_VERTS) flush_batch();
+    GxOutVertex* V = s_bverts + s_bn_verts;
+    GxFrameTransform ft;
+    ft.inv_efb_w = 1.0f / EFB_W;
+    ft.inv_efb_h = 1.0f / EFB_H;
+    if (!tri) s_verts.resize(count);
+    { ProfScope px_(g_prof_xform_ticks); gx_process_vertices(vat, count, data, tri ? V : s_verts.data(), ft); }
+    if (!tri) {
+        expand_lines_points(prim, s_verts);
+        prim = 0;
+        count = (u32)s_verts.size();
+        if (count == 0) return;
+        memcpy(V, s_verts.data(), count * sizeof(GxOutVertex));
+    }
+    s_last_draw_verts = V;
+    if (dbg_field && s_fields == dbg_field && s_draws_this_field <= 40) {
+        auto xff = [](u32 a) { float f; memcpy(&f, &g_gx.xfmem[a], 4); return f; };
+        LOG("gxdbg", "draw prim=%u vat=%u n=%u vcd=%08X/%08X vat=%08X/%08X/%08X genmode=%08X", prim, vat, count, g_gx.vcd_lo,
+            g_gx.vcd_hi, g_gx.vat_a[vat], g_gx.vat_b[vat], g_gx.vat_c[vat], g_gx.bp[0]);
+        LOG("gxdbg", "  vp %.1f %.1f %.1f | %.1f %.1f %.1f  proj %.3f %.3f %.3f %.3f %.3f %.3f type=%u",
+            xff(0x101A), xff(0x101B), xff(0x101C), xff(0x101D), xff(0x101E), xff(0x101F), xff(0x1020), xff(0x1021),
+            xff(0x1022), xff(0x1023), xff(0x1024), xff(0x1025), g_gx.xfmem[0x1026]);
+        for (u32 i = 0; i < std::min(count, 3u); i++)
+            LOG("gxdbg", "  v%u clip=(%.2f %.2f %.3f %.2f) col0=(%.2f %.2f %.2f %.2f) tc0=(%.3f %.3f %.3f)", i, V[i].pos[0],
+                V[i].pos[1], V[i].pos[2], V[i].pos[3], V[i].col0[0], V[i].col0[1],
+                V[i].col0[2], V[i].col0[3], V[i].tex[0][0], V[i].tex[0][1], V[i].tex[0][2]);
+        LOG("gxdbg", "  zmode=%08X cmode0=%08X scis=%08X/%08X off=%08X tev0=%08X/%08X tref=%08X", g_gx.bp[0x40], g_gx.bp[0x41],
+            g_gx.bp[0x20], g_gx.bp[0x21], g_gx.bp[0x59], g_gx.bp[0xC0], g_gx.bp[0xC1], g_gx.bp[0x28]);
+    }
+    if (dbg_field && s_fields == dbg_field) {   // whole-field visibility statistics
+        static u32 st_draws, st_behind, st_zout, st_xyout, st_persp, st_ztest;
+        st_draws++;
+        if (!g_gx.xfmem[0x1026]) st_persp++;
+        if (g_gx.bp[0x40] & 1) st_ztest++;
+        bool behind = true, zout = true, xyout = true;
+        for (u32 i = 0; i < count; i++) {
+            const float* p = V[i].pos;
+            if (p[3] > 0) behind = false;
+            if (p[2] >= 0 && p[2] <= p[3]) zout = false;
+            if (fabsf(p[0]) <= fabsf(p[3]) && fabsf(p[1]) <= fabsf(p[3])) xyout = false;
+        }
+        st_behind += behind; st_zout += zout; st_xyout += xyout;
+        bool big = false;
+        for (u32 i = 0; i + 1 < count && !big; i++) {
+            const float* p = V[i].pos;
+            const float* q = V[i + 1].pos;
+            if (p[3] > 0 && q[3] > 0 && fabsf(p[0] / p[3] - q[0] / q[3]) > 0.8f) big = true;
+        }
+        bool nearz = false;
+        if (g_gx.bp[0x40] & 0x10)
+            for (u32 i = 0; i < count; i++) {
+                const float* p = V[i].pos;
+                if (p[3] > 0 && p[2] / p[3] < 0.9f) nearz = true;
+            }
+        static u32 st_near;
+        if (nearz && st_near++ >= 40) nearz = false;
+        if (big || nearz || ((g_gx.bp[0x40] & 0x10) && st_draws <= 3)) {   // screen-covering / near-depth draws
+            float zmin = 9, zmax = -9, xmin = 9, xmax = -9, ymin = 9, ymax = -9;
+            for (u32 i = 0; i < count; i++) {
+                const float* p = V[i].pos;
+                if (p[3] <= 0) continue;
+                zmin = std::min(zmin, p[2] / p[3]); zmax = std::max(zmax, p[2] / p[3]);
+                xmin = std::min(xmin, p[0] / p[3]); xmax = std::max(xmax, p[0] / p[3]);
+                ymin = std::min(ymin, p[1] / p[3]); ymax = std::max(ymax, p[1] / p[3]);
+            }
+            LOG("gxz", "#%u big=%d near=%d zmode=%02X persp=%d n=%u z=[%.5f %.5f] x=[%.2f %.2f] y=[%.2f %.2f] vp z %.0f/%.0f proj4/5 %g %g cm0=%04X",
+                st_draws, (int)big, (int)nearz, g_gx.bp[0x40] & 0xFF, !g_gx.xfmem[0x1026], count, zmin, zmax, xmin, xmax, ymin, ymax,
+                [] { float f; memcpy(&f, &g_gx.xfmem[0x101C], 4); return f; }(),
+                [] { float f; memcpy(&f, &g_gx.xfmem[0x101F], 4); return f; }(),
+                [] { float f; memcpy(&f, &g_gx.xfmem[0x1024], 4); return f; }(),
+                [] { float f; memcpy(&f, &g_gx.xfmem[0x1025], 4); return f; }(), g_gx.bp[0x41] & 0xFFFF);
+            if (big)
+                LOG("gxz", "   stages=%u tev0=%06X/%06X tev1=%06X/%06X order=%06X ksel=%06X k0=%d,%d,%d,%d reg0=%d,%d,%d,%d img0=%06X img3=%06X",
+                    ((g_gx.bp[0] >> 10) & 15) + 1, g_gx.bp[0xC0] & 0xFFFFFF, g_gx.bp[0xC1] & 0xFFFFFF, g_gx.bp[0xC2] & 0xFFFFFF,
+                    g_gx.bp[0xC3] & 0xFFFFFF, g_gx.bp[0x28] & 0xFFFFFF, g_gx.bp[0xF6] & 0xFFFFFF, s_tev_k[0][0], s_tev_k[0][1],
+                    s_tev_k[0][2], s_tev_k[0][3], s_tev_reg[1][0], s_tev_reg[1][1], s_tev_reg[1][2], s_tev_reg[1][3],
+                    g_gx.bp[0x88] & 0xFFFFFF, g_gx.bp[0x94] & 0xFFFFFF);
+        }
+        if (st_draws % 500 == 0 || s_draws_this_field == 1)
+            LOG("gxstat", "draws=%u persp=%u ztest=%u all-behind=%u z-out=%u xy-out=%u zclear=%06X", st_draws, st_persp,
+                st_ztest, st_behind, st_zout, st_xyout, g_gx.bp[0x51] & 0xFFFFFF);
+    }
+    if (tri && (dbg_flags & 0x30) && g_gx.xfmem[0x1026] && (g_gx.bp[0x41] & 1) && count == 4) {
+        // 0x10: skip 1-stage blended screen quads, 0x20: skip multi-stage ones (post-effect debugging)
+        u32 stages = ((g_gx.bp[0] >> 10) & 15) + 1;
+        if (((dbg_flags & 0x10) && stages == 1) || ((dbg_flags & 0x20) && stages > 1)) {
+            const float* a = V[0].pos;
+            const float* b = V[2].pos;
+            if (fabsf(a[0] - b[0]) > 1.5f) return;
+        }
+    }
+    u32* I = s_bidx + s_bn_idx;
+    u32 nidx = build_indices(prim, count, s_bn_verts, I);
+    {   // debug: large alpha-blended layers anywhere in the race (screen area of triangles in front of the camera)
+        static const bool area_dbg = getenv("DD_DBG_AREA") != nullptr;
+        static int area_logged;
+        if (area_dbg && (g_gx.bp[0x41] & 1) && area_logged < 60 && s_fields > 3000) {
+            double area = 0;
+            for (u32 t = 0; t + 2 < nidx; t += 3) {
+                const float* a = V[I[t] - s_bn_verts].pos;
+                const float* b = V[I[t + 1] - s_bn_verts].pos;
+                const float* d = V[I[t + 2] - s_bn_verts].pos;
+                if (a[3] <= 0 || b[3] <= 0 || d[3] <= 0) continue;
+                auto cl = [](float v) { return v < -1 ? -1.0f : v > 1 ? 1.0f : v; };
+                float ax = cl(a[0] / a[3]), ay = cl(a[1] / a[3]), bx = cl(b[0] / b[3]), by = cl(b[1] / b[3]), dx = cl(d[0] / d[3]), dy = cl(d[1] / d[3]);
+                area += fabs((bx - ax) * (dy - ay) - (dx - ax) * (by - ay)) * 0.5;
+            }
+            if (area > 0.8) {
+                area_logged++;
+                LOG("gxarea", "field %u draw %u area=%.2f n=%u persp=%d zmode=%02X cm0=%04X stages=%u tev0=%06X/%06X order=%06X k0=%d,%d,%d,%d reg1=%d,%d,%d,%d img0=%06X fog=%06X",
+                    s_fields, s_draws_this_field, area, count, !g_gx.xfmem[0x1026], g_gx.bp[0x40] & 0xFF, g_gx.bp[0x41] & 0xFFFF,
+                    ((g_gx.bp[0] >> 10) & 15) + 1, g_gx.bp[0xC0] & 0xFFFFFF, g_gx.bp[0xC1] & 0xFFFFFF, g_gx.bp[0x28] & 0xFFFFFF,
+                    s_tev_k[0][0], s_tev_k[0][1], s_tev_k[0][2], s_tev_k[0][3], s_tev_reg[1][0], s_tev_reg[1][1], s_tev_reg[1][2],
+                    s_tev_reg[1][3], g_gx.bp[0x88] & 0xFFFFFF, g_gx.bp[0xF1] & 0xFFFFFF);
+            }
+        }
+    }
+    s_bn_verts += count;
+    s_bn_idx += nidx;
     if (s_probe_draws) depth_probe("draw", prim, count);
 }
 
@@ -957,6 +1147,7 @@ static void blit(ID3D11ShaderResourceView* src, ID3D11RenderTargetView* dst, int
     s_ctx->PSSetSamplers(0, 1, &smp);
     s_ctx->Draw(3, 0);
     s_ctx->PSSetShaderResources(0, 8, none);
+    s_bind_dirty = true;
 }
 
 static void release_copy(EfbCopy& c) {
@@ -988,7 +1179,7 @@ static void clear_depth_rect(const D3D11_RECT& r, float z) {
     s_ctx->VSSetConstantBuffers(0, 1, &s_copy_cb);
     s_ctx->PSSetShader(s_null_ps, nullptr, 0);
     s_ctx->Draw(3, 0);
-    apply_viewport_scissor();
+    s_bind_dirty = true;
 }
 
 static void efb_clear_rect(u32 x, u32 y, u32 w, u32 h) {
@@ -1015,6 +1206,7 @@ static bool s_png_alpha;
 
 // Debug: read EFB colour (RGBA) at a few points.
 static void efb_sample_log(const char* what) {
+    flush_batch();
     static ID3D11Texture2D* st;
     if (!st) {
         D3D11_TEXTURE2D_DESC d;
@@ -1038,6 +1230,7 @@ static void efb_sample_log(const char* what) {
 
 static void efb_copy(u32 val) {
     if (!s_ok) return;
+    flush_batch();
     u32 tl = g_gx.bp[0x49], sz = g_gx.bp[0x4A];
     u32 sx = tl & 0x3FF, sy = (tl >> 10) & 0x3FF, sw = (sz & 0x3FF) + 1, sh = ((sz >> 10) & 0x3FF) + 1;
     u32 dst = (g_gx.bp[0x4B] & 0x00FFFFFF) << 5;
@@ -1085,6 +1278,10 @@ static void efb_copy(u32 val) {
         D3D11_BOX box = {sx * EFB_SCALE, sy * EFB_SCALE, 0, (sx + sw) * EFB_SCALE, (sy + sh) * EFB_SCALE, 1};
         s_ctx->CopySubresourceRegion(c.tex, 0, 0, 0, 0, s_efb, 0, &box);
         s_frame++;
+        c.frame = s_frame;
+        // DD_DBG_SLOW=ms: busy-wait this long per game frame (simulates a slower host when testing timing behaviour)
+        static const double slow_ms = getenv("DD_DBG_SLOW") ? atof(getenv("DD_DBG_SLOW")) : 0.0;
+        if (slow_ms > 0) for (double t0 = qpc_ms(); qpc_ms() - t0 < slow_ms;) YieldProcessor();
     } else {
         u32 tw = half ? std::max(1u, sw / 2) : sw, th = half ? std::max(1u, sh / 2) : sh;
         int mode = 5;
@@ -1117,6 +1314,8 @@ static void efb_copy(u32 val) {
                                                  GX_TF_IA8, GX_TF_I8, GX_TF_I8, GX_TF_I8};
         c.bytes = std::min(gx_tex_size_bytes(tex_fmt_for_copy[fmt & 15], tw, th), 0x01800000u - std::min(dst, 0x01800000u));
         c.mem_hash = hash_mem(host_ptr(dst), c.bytes);
+        c.validated_frame = s_frame;
+        c.stale = false;
         ID3D11RenderTargetView* rtv = nullptr;
         s_dev->CreateRenderTargetView(c.tex, nullptr, &rtv);
         cbv.p0[0] = (float)mode;
@@ -1144,6 +1343,8 @@ static void load_tlut(u32 v) {
 }
 
 void gx_on_bp(u32 reg, u32 old, u32 val) {
+    // any change can affect the pixel pipeline; TLUT loads and copies act even when the value repeats
+    if (val != old || reg == 0x52 || reg == 0x65) s_state_valid = false;
     switch (reg) {
     case 0x52: efb_copy(val); break;
     case 0x65: load_tlut(val); break;
@@ -1161,7 +1362,9 @@ void gx_on_bp(u32 reg, u32 old, u32 val) {
     }
     }
 }
-void gx_on_xf(u32 addr, u32 count, const u32* data) {}
+void gx_on_xf(u32 addr, u32 count, const u32* data) {
+    if (addr <= 0x101A && addr + count > 0x101A) s_state_valid = false;   // viewport width: range fog constants
+}
 void gx_on_cp(u32 reg, u32 val) {}
 
 // ---------------------------------------------------------------- presentation
@@ -1175,23 +1378,30 @@ void gx_on_retrace() {
         static u32 last_frame;
         u64 now = GetTickCount64();
         double secs = (double)(now - last_ms + 1) / 1000.0;
-        LOG("gx", "field %u: %.1f fields/s, %.1f game frames/s, %u draws in last field, %zu shaders, %zu textures", s_fields,
-            250.0 / secs, (s_frame - last_frame) / secs, s_draws_this_field, s_ps_cache.size(), s_tex_cache.size());
+        LOG("gx", "field %u: %.1f fields/s, %.1f game frames/s, %u hitches, %u draws (%u batches) in last field, %zu shaders, %zu textures",
+            s_fields, 250.0 / secs, (s_frame - last_frame) / secs, s_repeats, s_draws_this_field, s_batches_this_field, s_ps_cache.size(),
+            s_tex_cache.size());
+        s_repeats = 0;
         last_ms = now;
         last_frame = s_frame;
         extern u64 g_prof_fifo_ticks;
-        LARGE_INTEGER f; QueryPerformanceFrequency(&f);
-        double ms = 1000.0 / (double)f.QuadPart;
+        // the counters are in TSC ticks: calibrate against the elapsed wall-clock time
+        static u64 last_tsc = __rdtsc();
+        u64 tsc = __rdtsc();
+        double ms = secs * 1000.0 / (double)(tsc - last_tsc + 1);
+        last_tsc = tsc;
         LOG("prof", "last %.1fs: fifo %.0f ms (draw %.0f ms, of which vertex xform %.0f ms)", secs, g_prof_fifo_ticks * ms,
             g_prof_draw_ticks * ms, g_prof_xform_ticks * ms);
         g_prof_fifo_ticks = g_prof_draw_ticks = g_prof_xform_ticks = 0;
     }
     s_draws_this_field = 0;
+    s_batches_this_field = 0;
 }
 
 // ---------------------------------------------------------------- screenshots (debugging aid)
 // s_png_alpha: save_png writes the alpha channel as grey instead of colour
 static void save_png(ID3D11Texture2D* tex, const char* path) {
+    flush_batch();
     D3D11_TEXTURE2D_DESC d;
     tex->GetDesc(&d);
     bool depth = d.Format == DXGI_FORMAT_R32_TYPELESS;
@@ -1271,6 +1481,8 @@ static void maybe_screenshot(ID3D11Texture2D* tex) {
 
 bool render_present_efb() {
     if (!s_ok) return false;
+    flush_batch();
+    s_bind_dirty = true;
     u32 xfb = vi_xfb_address();
     auto it = s_xfb_copies.find(xfb);
     if (it == s_xfb_copies.end() || !it->second.srv) {
@@ -1319,6 +1531,25 @@ bool render_present_efb() {
     s_ctx->Draw(3, 0);
     s_ctx->PSSetShaderResources(0, 8, none);
     maybe_screenshot(it->second.tex);
+    {   // stutter diagnostics: a field that repeats the previous frame while the game renders every field
+        static u32 last_shown, streak;   // streak: consecutive fields that each showed a new frame
+        u32 shown = it->second.frame;
+        if (shown == last_shown) {
+            if (streak >= 25) {   // the game was running at full rate: this is a visible hitch
+                s_repeats++;
+                static int logged;
+                if (logged++ < 100 || s_hitch_shader_ms + s_hitch_texture_ms > 5)
+                    LOG("hitch", "field %u repeated game frame %u: %u shaders compiled in %.1f ms, %u textures decoded in %.1f ms",
+                        s_fields, shown, s_hitch_shaders, s_hitch_shader_ms, s_hitch_textures, s_hitch_texture_ms);
+            }
+            streak = 0;
+        } else {
+            streak++;
+        }
+        last_shown = shown;
+        s_hitch_shaders = s_hitch_textures = 0;
+        s_hitch_shader_ms = s_hitch_texture_ms = 0;
+    }
     s_swap->Present(0, 0);
     return true;
 }

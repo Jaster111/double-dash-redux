@@ -14,8 +14,31 @@ void gx_vi_retrace();                                                  // gx: en
 void dbg_on_field();                                                   // host/debug.cpp
 
 static bool is_pal() { return ((s_regs[0x02 / 2] >> 8) & 3) == 1; }
-static u64 field_ticks() { return is_pal() ? TB_HZ / 50 : (u64)(TB_HZ / 59.94); }
-static u32 lines_per_field() { return is_pal() ? 312 : 262; }
+
+// Half-lines per field from the vertical timing (VTR equalisation / active lines, VTO / VTE pre- and
+// post-blanking of the odd and even field, averaged), as Dolphin does: 625 for PAL 50 Hz, 525 for
+// NTSC and EuRGB60 (PAL colour with 60 Hz timing, so the format bits alone cannot tell the rate).
+static u32 half_lines_per_field() {
+    u32 equ = s_regs[0x00 / 2] & 0xF, acv = (s_regs[0x00 / 2] >> 4) & 0x3FF;
+    u32 prb_o = s_regs[0x0E / 2] & 0x3FF, psb_o = s_regs[0x0C / 2] & 0x3FF;
+    u32 prb_e = s_regs[0x12 / 2] & 0x3FF, psb_e = s_regs[0x10 / 2] & 0x3FF;
+    u32 odd = 3 * equ + prb_o + 2 * acv + psb_o, even = 3 * equ + prb_e + 2 * acv + psb_e;
+    return (odd + even) / 2;
+}
+
+static u64 field_ticks() {
+    u32 hlw = s_regs[0x06 / 2] & 0x1FF;   // HTR0: half-line width in VI clock samples
+    u32 hl = half_lines_per_field();
+    if (hlw && hl >= 400 && hl <= 700) {
+        double clk = (s_regs[0x6C / 2] & 1) ? 54e6 : 27e6;
+        return (u64)(TB_HZ * 2.0 * hlw * hl / clk);
+    }
+    return is_pal() ? TB_HZ / 50 : (u64)(TB_HZ / 59.94);
+}
+static u32 lines_per_field() {
+    u32 hl = half_lines_per_field();
+    return hl >= 400 && hl <= 700 ? hl / 2 : is_pal() ? 312 : 262;
+}
 
 static u32 reg32(u32 off) { return ((u32)s_regs[off / 2] << 16) | s_regs[off / 2 + 1]; }
 
@@ -30,6 +53,12 @@ static void update_irq() {
 
 static void field_event(u64) {
     u64 now = tb_now();
+    static u64 s_logged_ticks;
+    if (field_ticks() != s_logged_ticks) {
+        s_logged_ticks = field_ticks();
+        LOG("vi", "field rate %.3f Hz (%u half-lines per field, %s)", (double)TB_HZ / s_logged_ticks, half_lines_per_field(),
+            is_pal() ? "PAL" : "NTSC/MPAL");
+    }
     // keep a steady cadence even if we were late
     s_field_start += field_ticks();
     if (now - s_field_start > field_ticks() * 4) s_field_start = now;
@@ -103,6 +132,7 @@ static void vi_write16(u32 off, u16 v) {
 const MmioBlock g_vi_block = {vi_read16, vi_write16, nullptr, nullptr};
 
 u32 vi_field_count() { return s_field; }
+double vi_field_ms() { return field_ticks() * 1000.0 / TB_HZ; }
 
 // physical address of the frame buffer the VI is scanning out
 u32 vi_xfb_address() {

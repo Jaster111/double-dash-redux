@@ -3,6 +3,7 @@
 #include "../common.h"
 #include <windows.h>
 #include <xinput.h>
+#include <timeapi.h>
 #include <vector>
 
 #pragma comment(lib, "xinput.lib")
@@ -24,6 +25,9 @@ static LRESULT CALLBACK wndproc(HWND h, UINT m, WPARAM w, LPARAM l) {
 }
 
 void host_init() {
+    // 1 ms scheduler granularity: the idle loop sleeps until the next VI field / timer event, and with the
+    // default 15.6 ms tick a Sleep(3) can overshoot by a whole field and make the game miss a frame
+    timeBeginPeriod(1);
     WNDCLASSA wc = {};
     wc.lpfnWndProc = wndproc;
     wc.hInstance = GetModuleHandleA(nullptr);
@@ -59,10 +63,28 @@ static u8 axis(float v) {   // -1..1 -> 0..255 around 0x80
     return (u8)(i < 0 ? 0 : i > 255 ? 255 : i);
 }
 
+// XInputGetState is slow for an empty slot (it probes for a device every time) and the SI asks for
+// every port several times per field: a connected pad is read on every call, an empty slot is probed
+// once per second.
+static bool xinput_state(int port, XINPUT_STATE* out) {
+    struct Slot { XINPUT_STATE st; bool connected; u64 last_ms; bool polled; };
+    static Slot slots[4];
+    if (port < 0 || port >= 4) return false;
+    Slot& sl = slots[port];
+    u64 now = GetTickCount64();
+    if (!sl.polled || sl.connected || now - sl.last_ms >= 1000) {
+        sl.connected = XInputGetState(port, &sl.st) == ERROR_SUCCESS;
+        sl.last_ms = now;
+        sl.polled = true;
+    }
+    *out = sl.st;
+    return sl.connected;
+}
+
 PadState host_get_pad(int port) {
     PadState p = {0, 0x80, 0x80, 0x80, 0x80, 0, 0, port == 0};
     XINPUT_STATE xs;
-    bool have_x = XInputGetState(port, &xs) == ERROR_SUCCESS;
+    bool have_x = xinput_state(port, &xs);
     if (have_x) {
         p.connected = true;
         auto& g = xs.Gamepad;

@@ -25,5 +25,7 @@ if(MSVC)
   target_compile_options(doubledash PRIVATE /MP /W3 /wd4244 /wd4267 /wd4996 /wd4146)
   target_compile_definitions(doubledash PRIVATE _CRT_SECURE_NO_WARNINGS NOMINMAX WIN32_LEAN_AND_MEAN)
   set_target_properties(doubledash PROPERTIES VS_DEBUGGER_WORKING_DIRECTORY ${CMAKE_SOURCE_DIR})
-  target_link_options(doubledash PRIVATE /STACK:16777216)
+  # PDB for the profiler / crash logs (DD_PROF); does not affect code generation
+  target_compile_options(doubledash PRIVATE /Zi)
+  target_link_options(doubledash PRIVATE /STACK:16777216 /DEBUG /OPT:REF /OPT:ICF)
 endif()

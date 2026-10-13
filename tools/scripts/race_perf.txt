@@ -1,0 +1,116 @@
+# Performance test: start a Grand Prix race (Star Cup / Sherbet Land, same menu path as gp_quit.txt),
+# then accelerate for 40 s and quit.  Compare the [gx] "game frames/s" lines of the race phase.
+#   powershell -File tools/run.ps1 -NoBuild -Seconds 130 -Script tools/scripts/race_perf.txt
+# (set DD_PROF=1 for a sampling profile of the race)
+hold 12 START
+wait 48
+hold 12 SL
+wait 48
+hold 12 A
+wait 48
+hold 12 START
+wait 48
+hold 12 SL
+wait 48
+hold 12 A
+wait 48
+hold 12 START
+wait 48
+hold 12 SL
+wait 48
+hold 12 A
+wait 48
+hold 12 START
+wait 48
+hold 12 SL
+wait 48
+hold 12 A
+wait 48
+hold 12 START
+wait 48
+hold 12 SL
+wait 48
+hold 12 A
+wait 48
+hold 12 START
+wait 48
+hold 12 SL
+wait 48
+hold 12 A
+wait 48
+hold 12 START
+wait 48
+hold 12 SL
+wait 48
+hold 12 A
+wait 48
+hold 12 START
+wait 48
+hold 12 SL
+wait 48
+hold 12 A
+wait 48
+hold 12 START
+wait 48
+hold 12 SL
+wait 48
+hold 12 A
+wait 48
+hold 12 START
+wait 48
+hold 12 SL
+wait 48
+hold 12 A
+wait 48
+hold 12 START
+wait 48
+hold 12 SL
+wait 48
+hold 12 A
+wait 48
+hold 12 START
+wait 48
+hold 12 SL
+wait 48
+hold 12 A
+wait 48
+hold 12 START
+wait 48
+hold 12 SL
+wait 48
+hold 12 A
+wait 48
+hold 12 START
+wait 48
+hold 12 SL
+wait 48
+hold 12 A
+wait 48
+hold 12 START
+wait 48
+hold 12 SL
+wait 48
+hold 12 A
+wait 48
+hold 12 START
+wait 48
+hold 12 SL
+wait 48
+hold 12 A
+wait 48
+hold 12 START
+wait 48
+hold 12 SL
+wait 48
+hold 12 A
+wait 48
+hold 12 START
+wait 48
+mark race running
+hold 150 A
+shot perf_start
+hold 600 A
+shot perf_mid
+hold 1250 A
+mark race done
+quit 0
