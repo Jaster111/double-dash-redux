@@ -1,19 +1,11 @@
 // EXI: external interface.  Channel 0 device 1 is the IPL/RTC/SRAM chip.
 // Memory card slots are provided by memcard.cpp (when a card is inserted).
+// SRAM layout: OSSram (0x00-0x13) then OSSramEx (0x14-0x3F).
 #include "hw.h"
+#include "exi.h"
 #include <time.h>
 #include <windows.h>
 #include <string>
-
-struct ExiDevice {
-    virtual ~ExiDevice() {}
-    virtual void select() {}
-    virtual void deselect() {}
-    virtual u8 transfer(u8 in) = 0;     // full-duplex byte exchange
-    virtual bool present() { return true; }
-    virtual void dma_read(u8* dst, u32 len) { for (u32 i = 0; i < len; i++) dst[i] = transfer(0); }
-    virtual void dma_write(const u8* src, u32 len) { for (u32 i = 0; i < len; i++) transfer(src[i]); }
-};
 
 // ---------------------------------------------------------------- IPL / RTC / SRAM
 struct IplDevice : ExiDevice {
@@ -25,6 +17,9 @@ struct IplDevice : ExiDevice {
         // defaults matching a freshly-initialised console (English, stereo)
         sram[0x12] = 0;          // language: English
         sram[0x13] = 0x2C;       // flags: stereo | bit3/5 set like a configured console
+        // SRAM-ex: memory card flash IDs (zero) and their checksums (~sum), as left by the IPL
+        // after unlocking a card; memcard.cpp replaces them with the ID a loaded card was formatted with
+        sram[0x3A] = sram[0x3B] = 0xFF;
         fix_checksum();
     }
     void fix_checksum() {
@@ -52,7 +47,7 @@ struct IplDevice : ExiDevice {
         if (GetTimeZoneInformation(&tz) != TIME_ZONE_ID_INVALID) secs -= tz.Bias * 60;
         rtc[0] = (u8)(secs >> 24); rtc[1] = (u8)(secs >> 16); rtc[2] = (u8)(secs >> 8); rtc[3] = (u8)secs;
     }
-    u8 transfer(u8 in) override {
+    u8 transfer(u8 in, bool) override {
         if (pos < 4) {
             addr = (addr << 8) | in;
             pos++;
@@ -86,7 +81,12 @@ struct ExiChannel {
 };
 static ExiChannel s_ch[3];
 static IplDevice s_ipl;
-ExiDevice* memcard_device(int slot);   // memcard.cpp (nullptr = no card)
+
+void sram_set_flash_id(int slot, const u8 id[12]) {
+    u8 sum = 0;
+    for (int i = 0; i < 12; i++) sum += s_ipl.sram[0x14 + 12 * slot + i] = id[i];
+    s_ipl.sram[0x3A + slot] = (u8)~sum;
+}
 
 enum : u32 {
     CSR_EXIINTMASK = 1 << 0, CSR_EXIINT = 1 << 1, CSR_TCINTMASK = 1 << 2, CSR_TCINT = 1 << 3,
@@ -107,6 +107,11 @@ void exi_init() {
     s_ch[0].dev[0] = memcard_device(0);
     s_ch[0].dev[1] = &s_ipl;
     s_ch[1].dev[0] = memcard_device(1);
+}
+
+void exi_raise_exiint(int chn) {
+    s_ch[chn].csr |= CSR_EXIINT;
+    update_irq();
 }
 
 static void refresh_ext(int chn) {
@@ -131,7 +136,7 @@ static void do_transfer(int chn) {
         u32 out = 0;
         for (int i = 0; i < n; i++) {
             u8 in = (u8)(c.data >> (24 - 8 * i));
-            u8 r = d ? d->transfer(rw == 0 ? 0 : in) : 0xFF;
+            u8 r = d ? d->transfer(rw == 0 ? 0 : in, rw != 0) : 0xFF;
             out |= (u32)r << (24 - 8 * i);
         }
         if (rw != 1) c.data = out;
@@ -191,5 +196,3 @@ static void exi_write16(u32 off, u16 v) {
 
 const MmioBlock g_exi_block = {exi_read16, exi_write16, exi_read32, exi_write32};
 
-// memory cards: none yet
-ExiDevice* memcard_device(int) { return nullptr; }

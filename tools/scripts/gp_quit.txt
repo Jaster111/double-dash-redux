@@ -1,6 +1,6 @@
 # Regression test: start a Grand Prix race (Star Cup / Sherbet Land), pause, quit, and check
 # that the game keeps rendering afterwards (it used to hang on a black screen).
-#   powershell -File toolsun.ps1 -NoBuild -Seconds 150 -Script tools\scripts\gp_quit.txt -HangExit
+#   powershell -File tools\run.ps1 -NoBuild -Seconds 150 -Script tools\scripts\gp_quit.txt -HangExit
 # Exit code 0 = pass, 3 = hang detected.
 # Menus: same input pattern as DD_AUTOPRESS (Start / stick-left / A, one per second).
 hold 12 START

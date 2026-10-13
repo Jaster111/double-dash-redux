@@ -1,0 +1,48 @@
+# Memory card test: boot with an empty (freshly formatted) card, answer YES to
+# "Would you like to create data ... in Slot A?" and wait until the file is written.
+#   powershell -File tools\run.ps1 -NoBuild -Seconds 90 -Script tools\scripts\save_create.txt -Card out\test_card.raw -NewCard
+# Check shots/save_1.png ("Data has been created.") and, with DD_DBG_EXI=1, the [memcard]
+# erase (F1) / page program (F2) commands in the log.  Booting again with the same card
+# must go straight to the title menu without the prompt.
+wait 400
+tap START
+wait 50
+tap START
+wait 50
+tap START
+wait 50
+tap START
+wait 50
+tap START
+wait 50
+tap START
+wait 50
+tap START
+wait 50
+tap START
+wait 50
+tap START
+wait 50
+tap START
+wait 50
+tap START
+wait 50
+tap START
+wait 50
+tap START
+wait 50
+tap START
+wait 50
+tap START
+wait 50
+wait 60
+shot save_prompt
+mark answering YES
+tap A
+wait 120
+shot save_1
+wait 250
+shot save_2
+wait 250
+shot save_3
+quit 0
