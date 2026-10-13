@@ -1,0 +1,8 @@
+# Guest functions replaced by native implementations.
+# <matched name | 0xADDRESS>   <native symbol>
+# The original recompiled body remains callable as orig_XXXXXXXX.
+OSSaveContext   HLE_OSSaveContext
+OSLoadContext   HLE_OSLoadContext
+OSInitContext   HLE_OSInitContext
+OSReport        HLE_OSReport
+OSPanic         HLE_OSPanic

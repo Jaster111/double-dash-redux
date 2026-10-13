@@ -1,0 +1,17 @@
+# game data (copyrighted, never commit)
+*.rvz
+*.iso
+*.gcm
+orig/
+
+# generated / build output
+build/
+out/
+__pycache__/
+
+# run artifacts
+shots/
+*.log
+*.wav
+*.raw
+crash_ram.bin

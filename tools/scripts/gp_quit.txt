@@ -1,0 +1,127 @@
+# Regression test: start a Grand Prix race (Star Cup / Sherbet Land), pause, quit, and check
+# that the game keeps rendering afterwards (it used to hang on a black screen).
+#   powershell -File toolsun.ps1 -NoBuild -Seconds 150 -Script tools\scripts\gp_quit.txt -HangExit
+# Exit code 0 = pass, 3 = hang detected.
+# Menus: same input pattern as DD_AUTOPRESS (Start / stick-left / A, one per second).
+hold 12 START
+wait 48
+hold 12 SL
+wait 48
+hold 12 A
+wait 48
+hold 12 START
+wait 48
+hold 12 SL
+wait 48
+hold 12 A
+wait 48
+hold 12 START
+wait 48
+hold 12 SL
+wait 48
+hold 12 A
+wait 48
+hold 12 START
+wait 48
+hold 12 SL
+wait 48
+hold 12 A
+wait 48
+hold 12 START
+wait 48
+hold 12 SL
+wait 48
+hold 12 A
+wait 48
+hold 12 START
+wait 48
+hold 12 SL
+wait 48
+hold 12 A
+wait 48
+hold 12 START
+wait 48
+hold 12 SL
+wait 48
+hold 12 A
+wait 48
+hold 12 START
+wait 48
+hold 12 SL
+wait 48
+hold 12 A
+wait 48
+hold 12 START
+wait 48
+hold 12 SL
+wait 48
+hold 12 A
+wait 48
+hold 12 START
+wait 48
+hold 12 SL
+wait 48
+hold 12 A
+wait 48
+hold 12 START
+wait 48
+hold 12 SL
+wait 48
+hold 12 A
+wait 48
+hold 12 START
+wait 48
+hold 12 SL
+wait 48
+hold 12 A
+wait 48
+hold 12 START
+wait 48
+hold 12 SL
+wait 48
+hold 12 A
+wait 48
+hold 12 START
+wait 48
+hold 12 SL
+wait 48
+hold 12 A
+wait 48
+hold 12 START
+wait 48
+hold 12 SL
+wait 48
+hold 12 A
+wait 48
+hold 12 START
+wait 48
+hold 12 SL
+wait 48
+hold 12 A
+wait 48
+hold 12 START
+wait 48
+hold 12 SL
+wait 48
+hold 12 A
+wait 48
+hold 12 START
+wait 48
+mark race running
+hold 400 A
+shot gp_quit_race
+tap START
+wait 60
+tap SD
+wait 30
+tap A
+wait 30
+tap SL
+wait 20
+shot gp_quit_confirm
+tap A
+mark quit confirmed
+waitframes 300
+shot gp_quit_after
+mark PASS: still rendering after quit
+quit 0
