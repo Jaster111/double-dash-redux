@@ -1,7 +1,7 @@
 # Build (optionally) and run the game for a limited time, then print the log tail.
 #   powershell -File tools\run.ps1 [-Seconds 20] [-NoBuild] [-Lines 80]
 #              [-Script tools\scripts\gp_next_race.txt] [-Laps 1] [-HangExit] [-Sym] [-Card FILE [-NewCard]]
-#              [-Autopilot on|win] [-Monitor N] [-Mute]
+#              [-Autopilot on|win] [-Monitor N] [-Mute] [-RunDir DIR]
 # -Script sets DD_SCRIPT (scripted controller input), -Laps sets DD_LAPS (course lap count),
 # -HangExit makes the runtime exit after reporting a hang, -Sym runs the log tail through tools\sym.py.
 # -Card sets DD_MEMCARD_A (slot A image; -NewCard deletes it first so the game starts with a blank card).
@@ -10,10 +10,12 @@
 # -Hz60 is given or DD_60HZ is already set.
 # -Autopilot sets DD_AUTOPILOT (the game's AI drives the players' karts; win = also keep P1 first in GP points).
 # -Monitor N opens the window on display N without taking the focus (DD_MONITOR), -Mute sets DD_MUTE (no audio device).
+# -RunDir runs the game in another directory (it needs orig\ there, e.g. a junction, and gets its own
+# doubledash.log, shots\, saves\ and cache\), so two test runs can go at the same time.
 # Test runs are windowed (DD_FULLSCREEN=0) unless DD_FULLSCREEN is set; settings.ini supplies everything else.
 # Other DD_* variables already set in the environment are passed through.
 param([int]$Seconds = 20, [switch]$NoBuild, [int]$Lines = 80, [string]$Script, [int]$Laps = -1, [switch]$HangExit,
-      [switch]$Sym, [string]$Card, [switch]$NewCard, [switch]$Hz60, [string]$Autopilot, [int]$Monitor = 0, [switch]$Mute)
+      [switch]$Sym, [string]$Card, [switch]$NewCard, [switch]$Hz60, [string]$Autopilot, [int]$Monitor = 0, [switch]$Mute, [string]$RunDir)
 Set-Location (Split-Path $PSScriptRoot -Parent)
 if (-not $NoBuild) {
     cmake -S . -B out -G "Visual Studio 17 2022" -A x64 | Out-Null
@@ -22,6 +24,8 @@ if (-not $NoBuild) {
     if ($errs) { $errs | ForEach-Object { $_.Line }; exit 1 }
 }
 if ($Script) { $env:DD_SCRIPT = (Resolve-Path $Script).Path }
+$exe = (Resolve-Path out\Release\doubledash.exe).Path
+if ($RunDir) { Set-Location $RunDir }
 if ($Card) {
     if ($NewCard) { Remove-Item $Card -ErrorAction SilentlyContinue }
     $env:DD_MEMCARD_A = $Card
@@ -34,7 +38,7 @@ if ($Monitor -gt 0) { $env:DD_MONITOR = "$Monitor" }
 if ($Mute) { $env:DD_MUTE = "1" }
 if (-not $env:DD_FULLSCREEN) { $env:DD_FULLSCREEN = "0" }   # test runs stay windowed whatever settings.ini says
 Remove-Item doubledash.log -ErrorAction SilentlyContinue
-$p = Start-Process -FilePath out\Release\doubledash.exe -PassThru -RedirectStandardError out\stderr.txt -RedirectStandardOutput out\stdout.txt
+$p = Start-Process -FilePath $exe -PassThru -RedirectStandardError out\stderr.txt -RedirectStandardOutput out\stdout.txt
 $null = $p.Handle   # keep the handle open so ExitCode is available afterwards
 $p.WaitForExit($Seconds * 1000) | Out-Null
 $code = 124

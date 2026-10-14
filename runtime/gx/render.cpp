@@ -79,7 +79,7 @@ static u32 s_draws_this_field;
 static u32 s_verts_this_field;   // vertices transformed (before line / point expansion)
 static u32 s_fields;
 // DD_DBG_FLAGS bits (renderer debugging): 1 no culling, 2 no depth test, 4 no depth writes, 8 clear depth to 1.0,
-// 0x40 no fog, 0x80 fog colour magenta (shows where fog is applied)
+// 0x40 no fog, 0x80 fog colour magenta (shows where fog is applied), 0x100 lit colour channels white (gx/vertex.cpp)
 static const u32 dbg_flags = getenv("DD_DBG_FLAGS") ? (u32)strtoul(getenv("DD_DBG_FLAGS"), nullptr, 0) : 0;
 // DD_DBG_FIELD: field number for the per-draw / copy debug dumps and depth probes (0 = all off)
 // (logs cover the 6 fields up to it, or up to DD_DBG_FIELD_END)
@@ -1526,18 +1526,16 @@ static void save_png(ID3D11Texture2D* tex, const char* path) {
         CoInitializeEx(nullptr, COINIT_MULTITHREADED);
         IWICImagingFactory* f = nullptr;
         CoCreateInstance(CLSID_WICImagingFactory, nullptr, CLSCTX_INPROC_SERVER, IID_PPV_ARGS(&f));
-        if (f) {
-            IWICStream* stream = nullptr;
-            f->CreateStream(&stream);
-            wchar_t wpath[MAX_PATH];
-            MultiByteToWideChar(CP_UTF8, 0, j->path.c_str(), -1, wpath, MAX_PATH);
-            stream->InitializeFromFilename(wpath, GENERIC_WRITE);
-            IWICBitmapEncoder* enc = nullptr;
-            f->CreateEncoder(GUID_ContainerFormatPng, nullptr, &enc);
-            enc->Initialize(stream, WICBitmapEncoderNoCache);
-            IWICBitmapFrameEncode* fr = nullptr;
-            enc->CreateNewFrame(&fr, nullptr);
-            fr->Initialize(nullptr);
+        IWICStream* stream = nullptr;
+        IWICBitmapEncoder* enc = nullptr;
+        IWICBitmapFrameEncode* fr = nullptr;
+        wchar_t wpath[MAX_PATH];
+        MultiByteToWideChar(CP_UTF8, 0, j->path.c_str(), -1, wpath, MAX_PATH);
+        // any failure (e.g. a bad path) skips the shot
+        if (f && SUCCEEDED(f->CreateStream(&stream)) && SUCCEEDED(stream->InitializeFromFilename(wpath, GENERIC_WRITE)) &&
+            SUCCEEDED(f->CreateEncoder(GUID_ContainerFormatPng, nullptr, &enc)) &&
+            SUCCEEDED(enc->Initialize(stream, WICBitmapEncoderNoCache)) && SUCCEEDED(enc->CreateNewFrame(&fr, nullptr)) &&
+            SUCCEEDED(fr->Initialize(nullptr))) {
             fr->SetSize(j->w, j->h);
             WICPixelFormatGUID pf = GUID_WICPixelFormat32bppRGBA;
             fr->SetPixelFormat(&pf);   // the encoder may substitute BGRA (it does on Windows 10)
@@ -1558,8 +1556,11 @@ static void save_png(ID3D11Texture2D* tex, const char* path) {
             fr->WritePixels(j->h, j->w * 4, (UINT)j->px.size(), j->px.data());
             fr->Commit();
             enc->Commit();
-            fr->Release(); enc->Release(); stream->Release(); f->Release();
-        }
+        } else LOG("gx", "screenshot %s could not be written", j->path.c_str());
+        if (fr) fr->Release();
+        if (enc) enc->Release();
+        if (stream) stream->Release();
+        if (f) f->Release();
         delete j;
         InterlockedDecrement(&s_png_pending);
         return 0;

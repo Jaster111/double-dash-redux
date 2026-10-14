@@ -245,10 +245,13 @@ static inline __m128 light_sum(const LitComp& C, const LightParams* lights, __m1
         float ndotl = nrm[0] * L[0] + nrm[1] * L[1] + nrm[2] * L[2];
         if (C.attn_en) {
             if (C.spot) {
+                // clamps written as !(x > 0) so a NaN becomes 0 as well, like max(0, x) on a GPU: the game leaves
+                // the direction of some spot-attenuated lights unset (a = 1,0,0, so it does not matter) and heap
+                // garbage there made cosa NaN, the whole channel NaN and the karts / Lakitu render black
                 float cosa = L[0] * Lp.dir[0] + L[1] * Lp.dir[1] + L[2] * Lp.dir[2];
-                if (cosa < 0) cosa = 0;
+                if (!(cosa > 0)) cosa = 0;
                 float num = Lp.a[0] + Lp.a[1] * cosa + Lp.a[2] * cosa * cosa;
-                if (num < 0) num = 0;
+                if (!(num > 0)) num = 0;
                 float den = Lp.k[0] + Lp.k[1] * dist + Lp.k[2] * dist2;
                 attn = den != 0 ? num / den : 0;
             } else {
@@ -256,7 +259,7 @@ static inline __m128 light_sum(const LitComp& C, const LightParams* lights, __m1
                 float ndoth = nrm[0] * Lp.dir[0] + nrm[1] * Lp.dir[1] + nrm[2] * Lp.dir[2];
                 float cosa = ndotl > 0 ? (ndoth > 0 ? ndoth : 0) : 0;
                 float num = Lp.a[0] + Lp.a[1] * cosa + Lp.a[2] * cosa * cosa;
-                if (num < 0) num = 0;
+                if (!(num > 0)) num = 0;
                 float den = Lp.k[0] + Lp.k[1] * cosa + Lp.k[2] * cosa * cosa;
                 attn = den != 0 ? num / den : 0;
                 // specular lights use the light direction rather than position for N.L
@@ -270,12 +273,15 @@ static inline __m128 light_sum(const LitComp& C, const LightParams* lights, __m1
     return _mm_min_ps(_mm_max_ps(acc, _mm_setzero_ps()), _mm_set1_ps(1.0f));
 }
 
+// DD_DBG_FLAGS 0x100: lit channels output white (tells lighting problems from TEV / texture ones)
+static const bool s_dbg_unlit = getenv("DD_DBG_FLAGS") && (strtoul(getenv("DD_DBG_FLAGS"), nullptr, 0) & 0x100);
+
 // the channel colour `prev` with C's lanes replaced by its lighting result
 static inline __m128 light_comp(const LitComp& C, const LightParams* lights, __m128 vcol, const float pos[3], const float nrm[3],
                                 __m128 prev) {
     __m128 mat = C.mat_vtx ? vcol : C.mat;
     __m128 r = mat;                                         // lighting disabled: material only
-    if (C.lit) r = _mm_mul_ps(light_sum(C, lights, C.amb_vtx ? vcol : C.amb, pos, nrm), mat);
+    if (C.lit) r = s_dbg_unlit ? _mm_set1_ps(1.0f) : _mm_mul_ps(light_sum(C, lights, C.amb_vtx ? vcol : C.amb, pos, nrm), mat);
     return _mm_or_ps(_mm_and_ps(C.mask, r), _mm_andnot_ps(C.mask, prev));
 }
 

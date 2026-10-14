@@ -1,0 +1,78 @@
+# All-Cup Tour (all 16 courses) on autopilot, 150cc, then the ending / staff roll.
+# Needs the unlocks (DD_UNLOCK=1); with DD_AUTOPILOT=win P1 wins the tour.  -Laps 1 keeps it to ~30 min.
+#   $env:DD_UNLOCK=1; powershell -File tools\run.ps1 -NoBuild -Seconds 3000 -Laps 1 -Autopilot win -HangExit -Monitor 2 -Mute -Script tools\scripts\act_150.txt
+# [course] log lines list the courses driven; shots act_150_NNN during the tour, act_150_end_NNN in the staff roll.
+pads 1
+hold 12 START
+wait 48
+hold 12 SL
+wait 48
+hold 12 A
+wait 48
+hold 12 START
+wait 48
+hold 12 SL
+wait 48
+hold 12 A
+wait 48
+hold 12 START
+wait 48
+hold 12 SL
+wait 48
+hold 12 A
+wait 48
+hold 12 START
+wait 48
+hold 12 SL
+wait 48
+hold 12 A
+wait 48
+hold 12 START
+wait 48
+hold 12 SL
+wait 48
+hold 12 A
+wait 48
+hold 12 START
+wait 48
+hold 12 SL
+wait 48
+hold 12 A
+wait 48
+mark title menu
+tap START
+wait 60
+tap A
+wait 90
+tap A
+wait 90
+tap SR x2
+wait 30
+shot act_150_class
+tap A
+wait 90
+tap A
+wait 78
+tap A
+wait 78
+tap A
+wait 78
+tap SR x4
+wait 30
+shot act_150_cup
+tap A
+wait 78
+tap A
+mark tour starting
+autoshot act_150 500
+# race mode (gRaceInfo+8) 9 = staff roll
+until 803BB284 == 9 A t150000
+autoshot act_150_end 250
+# the credits take ~9000 fields and end on "Thanks for playing!", which waits for a button
+wait 10000
+until 803BB284 != 9 A t3000
+autoshot off
+wait 500
+shot act_150_after
+mark PASS: tour and staff roll done
+quit 0

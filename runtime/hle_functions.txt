@@ -6,3 +6,5 @@ OSLoadContext   HLE_OSLoadContext
 OSInitContext   HLE_OSInitContext
 OSReport        HLE_OSReport
 OSPanic         HLE_OSPanic
+0x80186824      HLE_RaceMgr_ct          # RaceMgr::RaceMgr (host/debug.cpp, DD_AUTOPILOT=ghost)
+0x801CDE4C      HLE_RaceApp_ctrlRecorder  # RaceApp::ctrlRecorder (host/debug.cpp, DD_AUTOPILOT=ghost)

@@ -1,0 +1,94 @@
+# 2-player battle coverage: shine on pipe (players drive in circles, firing items).  Battle menus:
+# Balloon / Shine Thief / Bob-omb Blast; stages Cookie Land, Block City, Luigi's Mansion / GameCube, Pipe Plaza, Tilt-A-Kart.
+#   $env:DD_UNLOCK=1; powershell -File tools\run.ps1 -NoBuild -Seconds 150 -HangExit -Monitor 2 -Mute -Script tools\scripts\battle_shine_pipe.txt
+pads 2
+hold 12 START
+wait 48
+hold 12 SL
+wait 48
+hold 12 A
+wait 48
+hold 12 START
+wait 48
+hold 12 SL
+wait 48
+hold 12 A
+wait 48
+hold 12 START
+wait 48
+hold 12 SL
+wait 48
+hold 12 A
+wait 48
+hold 12 START
+wait 48
+hold 12 SL
+wait 48
+hold 12 A
+wait 48
+hold 12 START
+wait 48
+hold 12 SL
+wait 48
+hold 12 A
+wait 48
+hold 12 START
+wait 48
+hold 12 SL
+wait 48
+hold 12 A
+wait 48
+mark title menu
+tap START
+wait 60
+tap SD
+wait 30
+tap A
+wait 90
+tap A
+wait 90
+tap SD x2
+wait 30
+tap A
+wait 90
+tap SD x1
+wait 30
+shot battle_shine_pipe_mode
+tap A A@2
+wait 78
+tap A A@2
+wait 78
+tap A A@2
+wait 78
+tap A A@2
+wait 78
+tap SD
+wait 30
+tap SR
+wait 30
+shot battle_shine_pipe_stage
+tap A A@2
+wait 78
+tap A A@2
+wait 78
+mark battle starting
+autoshot battle_shine_pipe 250
+hold 200 A SL A@2 SR@2
+tap X Y X@2 Y@2
+hold 200 A SL A@2 SR@2
+tap X Y X@2 Y@2
+hold 200 A SL A@2 SR@2
+tap X Y X@2 Y@2
+hold 200 A SL A@2 SR@2
+tap X Y X@2 Y@2
+hold 200 A SL A@2 SR@2
+tap X Y X@2 Y@2
+hold 200 A SL A@2 SR@2
+tap X Y X@2 Y@2
+hold 200 A SL A@2 SR@2
+tap X Y X@2 Y@2
+hold 200 A SL A@2 SR@2
+tap X Y X@2 Y@2
+autoshot off
+mark PASS: battle still running
+quit 0

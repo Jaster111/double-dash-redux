@@ -8,6 +8,18 @@
 #include <string>
 
 // ---------------------------------------------------------------- IPL / RTC / SRAM
+// seconds since 2000-01-01 in local time, like a console set to the user's clock (also the boot timebase,
+// cpu.cpp)
+u32 host_rtc_seconds() {
+    time_t now = time(nullptr);
+    struct tm t2000 = {};
+    t2000.tm_year = 100; t2000.tm_mday = 1;
+    time_t base = _mkgmtime(&t2000);
+    u32 secs = (u32)(now - base);
+    TIME_ZONE_INFORMATION tz;
+    if (GetTimeZoneInformation(&tz) != TIME_ZONE_ID_INVALID) secs -= tz.Bias * 60;
+    return secs;
+}
 struct IplDevice : ExiDevice {
     u32 addr = 0, pos = 0, rw = 0;
     u8 sram[64]{};
@@ -36,15 +48,7 @@ struct IplDevice : ExiDevice {
     void deselect() override { if (addr & 0x80000000u) fix_checksum_if_sram(); }
     void fix_checksum_if_sram() {}
     void update_rtc() {
-        // seconds since 2000-01-01 (the OS adds the SRAM counter bias)
-        time_t now = time(nullptr);
-        struct tm t2000 = {};
-        t2000.tm_year = 100; t2000.tm_mday = 1;
-        time_t base = _mkgmtime(&t2000);
-        u32 secs = (u32)(now - base);
-        // local time, like a console set to the user's clock
-        TIME_ZONE_INFORMATION tz;
-        if (GetTimeZoneInformation(&tz) != TIME_ZONE_ID_INVALID) secs -= tz.Bias * 60;
+        u32 secs = host_rtc_seconds();   // the OS adds the SRAM counter bias
         rtc[0] = (u8)(secs >> 24); rtc[1] = (u8)(secs >> 16); rtc[2] = (u8)(secs >> 8); rtc[3] = (u8)secs;
     }
     u8 transfer(u8 in, bool) override {

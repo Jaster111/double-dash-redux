@@ -1,0 +1,64 @@
+# Ghost load test (after tt_ghost_save.txt, same card): Time Trial on Luigi Circuit -> Load Ghost Data ->
+# Slot A -> the saved ghost -> YES, then race.  With DD_UNLOCK=1 the staff ghost runs as well.
+#   $env:DD_UNLOCK=1; powershell -File tools\run.ps1 -NoBuild -Seconds 200 -Laps 1 -Autopilot ghost -HangExit -Script tools\scripts\tt_ghost_load.txt -Card out\ghost_card.raw
+# Check shots/ghost_load_*.png: the best time is the saved record, "Load complete.", and the race minimap
+# shows the card ghost (G) and the staff ghost (SG).
+pads 1
+wait 900
+tap START
+wait 60
+tap START
+wait 60
+tap START
+wait 60
+tap START
+wait 60
+tap START
+wait 60
+mark title menu
+tap START
+wait 60
+tap A
+wait 90
+tap SD
+wait 30
+tap A
+wait 90
+tap A
+wait 90
+tap A
+wait 90
+tap A
+wait 90
+tap A
+wait 90
+tap A
+wait 90
+tap A
+wait 90
+tap A
+wait 90
+tap A
+wait 90
+tap A
+wait 90
+tap A
+wait 120
+shot ghost_load_slot
+tap A
+wait 120
+shot ghost_load_list
+tap A
+wait 120
+hold 10 SL
+wait 40
+shot ghost_load_confirm
+tap A
+mark loading ghost
+wait 120
+shot ghost_load_done
+autoshot ghost_load_race 300
+wait 2700
+autoshot off
+mark PASS: raced against the loaded ghost
+quit 0

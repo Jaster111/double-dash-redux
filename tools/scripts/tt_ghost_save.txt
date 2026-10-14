@@ -1,0 +1,88 @@
+# Ghost save test: a 1-lap Time Trial on Luigi Circuit, driven by the AI with the pad recorder still on
+# (DD_AUTOPILOT=ghost), then Save Ghost -> Slot A -> New Save -> YES.  The card needs the game's data first:
+#   powershell -File tools\run.ps1 -NoBuild -Seconds 90 -Script tools\scripts\save_create.txt -Card out\ghost_card.raw -NewCard
+#   powershell -File tools\run.ps1 -NoBuild -Seconds 260 -Laps 1 -Autopilot ghost -HangExit -Script tools\scripts\tt_ghost_save.txt -Card out\ghost_card.raw
+# Check shots/ghost_save_*.png: the post-race menu offers SAVE GHOST, the ghost line carries today's date
+# and "Saving complete." appears.  tt_ghost_load.txt loads it back.
+# Boot with game data on the card: 50/60 Hz prompt, loading, title (no memory card prompts).
+pads 1
+wait 900
+tap START
+wait 60
+tap START
+wait 60
+tap START
+wait 60
+tap START
+wait 60
+tap START
+wait 60
+mark title menu
+tap START
+wait 60
+tap A
+wait 90
+tap SD
+wait 30
+tap A
+wait 90
+tap A
+wait 90
+tap A
+wait 90
+tap A
+wait 90
+tap A
+wait 90
+tap A
+wait 90
+tap A
+wait 90
+tap A
+wait 90
+tap A
+wait 90
+tap A
+wait 90
+tap A
+wait 90
+mark race loading
+tap A
+wait 90
+tap A
+wait 90
+wait 3800
+shot ghost_save_result
+tap A
+wait 120
+tap A
+wait 120
+wait 90
+hold 10 SD
+wait 40
+hold 10 SD
+wait 40
+hold 10 SD
+wait 40
+hold 10 SD
+wait 40
+shot ghost_save_menu
+tap A
+wait 120
+shot ghost_save_slot
+tap A
+wait 120
+shot ghost_save_list
+tap A
+wait 120
+hold 10 SL
+wait 40
+shot ghost_save_confirm
+tap A
+mark saving ghost
+wait 120
+shot ghost_save_done
+wait 400
+shot ghost_save_after
+mark PASS: ghost saved
+quit 0

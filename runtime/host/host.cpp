@@ -73,6 +73,11 @@ void host_init() {
     // 1 ms scheduler granularity: the idle loop sleeps until the next VI field / timer event, and with the
     // default 15.6 ms tick a Sleep(3) can overshoot by a whole field and make the game miss a frame
     timeBeginPeriod(1);
+    // The emulation thread (all guest threads are fibers on it) sleeps many times per field in that idle loop.
+    // At normal priority, on a busy machine each wake-up waits behind other processes' time slices, and the
+    // game slowed to ~10% (no frame for over 6 s at a time) under a parallel build.  Above normal gets the CPU
+    // back as soon as a sleep ends; the thread still sleeps whenever the game is idle, so it takes no more.
+    SetThreadPriority(GetCurrentThread(), THREAD_PRIORITY_ABOVE_NORMAL);
     WNDCLASSA wc = {};
     wc.lpfnWndProc = wndproc;
     wc.hInstance = GetModuleHandleA(nullptr);
@@ -158,6 +163,8 @@ static bool xinput_state(int port, XINPUT_STATE* out) {
     return sl.connected;
 }
 
+bool dbg_script_active();   // host/debug.cpp: DD_SCRIPT runs ignore (and do not rumble) the real controllers
+
 // GameCube pads have one on/off rumble motor; on an XInput pad it drives both motors
 void host_set_rumble(int port, bool on) {
     static const bool enabled = cfg_bool("input.rumble", true);
@@ -167,6 +174,7 @@ void host_set_rumble(int port, bool on) {
     state[port] = on;
     static int logged;
     if (logged < 6) LOG("host", "pad %d rumble %s%s", port + 1, on ? "on" : "off", ++logged == 6 ? " (not logged further)" : "");
+    if (dbg_script_active()) return;
     XINPUT_VIBRATION v = {};
     if (on) v.wLeftMotorSpeed = v.wRightMotorSpeed = (WORD)(65535 * strength / 100);
     XInputSetState(port, &v);
@@ -175,7 +183,10 @@ void host_set_rumble(int port, bool on) {
 PadState host_get_pad(int port) {
     PadState p = {0, 0x80, 0x80, 0x80, 0x80, 0, 0, port == 0};
     XINPUT_STATE xs;
-    bool have_x = xinput_state(port, &xs);
+    // scripted test runs only see the script: a controller touched meanwhile (or another test instance's
+    // window) must not change the menu path
+    const bool scripted = dbg_script_active();
+    bool have_x = !scripted && xinput_state(port, &xs);
     if (have_x) {
         p.connected = true;
         auto& g = xs.Gamepad;
@@ -201,7 +212,7 @@ PadState host_get_pad(int port) {
         if (p.l > 200) p.buttons |= PAD_L;
         if (p.r > 200) p.buttons |= PAD_R;
     }
-    if (port == 0 && GetForegroundWindow() == s_wnd) {
+    if (port == 0 && !scripted && GetForegroundWindow() == s_wnd) {
         // keyboard (see README): arrows/WASD steer, Space/X accelerate, Z/Backspace brake,
         // Shift/E drift (R), Q = L, C/Ctrl item (X), V = Y, F/Tab swap (Z), Enter/Esc start
         auto k = [](int vk) { return s_keys[vk]; };

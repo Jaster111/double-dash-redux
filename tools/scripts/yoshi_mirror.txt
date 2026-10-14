@@ -1,0 +1,70 @@
+# Regression test for black karts / Lakitu (NaN in spot-attenuated lighting, fixed in gx/vertex.cpp): GP Star Cup
+# in mirror mode on autopilot, screenshots every 60 fields from the start of race 3 (Yoshi Circuit), where it
+# showed up most often (it depends on heap garbage, so it was intermittent and came late in long runs).
+#   $env:DD_UNLOCK=1; powershell -File tools\run.ps1 -NoBuild -Seconds 700 -Laps 1 -Autopilot on -HangExit -Script tools\scripts\yoshi_mirror.txt
+# Check shots/yoshi_mirror_*.png for flat black karts or Lakitu.
+pads 1
+hold 12 START
+wait 48
+hold 12 SL
+wait 48
+hold 12 A
+wait 48
+hold 12 START
+wait 48
+hold 12 SL
+wait 48
+hold 12 A
+wait 48
+hold 12 START
+wait 48
+hold 12 SL
+wait 48
+hold 12 A
+wait 48
+hold 12 START
+wait 48
+hold 12 SL
+wait 48
+hold 12 A
+wait 48
+hold 12 START
+wait 48
+hold 12 SL
+wait 48
+hold 12 A
+wait 48
+hold 12 START
+wait 48
+hold 12 SL
+wait 48
+hold 12 A
+wait 48
+tap START
+wait 60
+tap A
+wait 90
+tap A
+wait 90
+tap SR x3
+wait 30
+tap A
+wait 90
+tap A
+wait 78
+tap A
+wait 78
+tap A
+wait 78
+tap SR x2
+wait 30
+tap A
+wait 78
+tap A
+# ResMgr::msCourseID 0x26 = Yoshi Circuit
+until 803D5B84 == 26 A t40000
+autoshot yoshi_mirror 60
+wait 2400
+autoshot off
+dumpram yoshi_mirror
+quit 0

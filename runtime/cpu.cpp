@@ -269,5 +269,9 @@ static LONG CALLBACK crash_handler(EXCEPTION_POINTERS* ep) {
 
 void cpu_init() {
     build_lookup();
+    // The IPL starts the game with the timebase holding the RTC time (ticks since 2000-01-01), and the OS
+    // takes the calendar date from it (OSGetTime -> OSTicksToCalendarTime): ghost and record dates.
+    u32 host_rtc_seconds();   // hw/exi.cpp
+    s_tb_offset = (s64)((u64)host_rtc_seconds() * TB_HZ);
     AddVectoredExceptionHandler(1, crash_handler);
 }
