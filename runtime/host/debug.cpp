@@ -186,6 +186,8 @@ static void script_field() {
             break;
         case Step::Quit:
             LOG("script", "quit (field %u, game frame %u)", field, frame);
+            void gx_wait_screenshots();   // gx/render.cpp: PNGs are written on worker threads
+            gx_wait_screenshots();
             ExitProcess(st.n);
         }
         if (!done) return;

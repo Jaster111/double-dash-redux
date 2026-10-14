@@ -59,7 +59,12 @@ void host_init() {
     }
     s_wnd = CreateWindowA("DoubleDash", "Mario Kart: Double Dash!!", WS_OVERLAPPEDWINDOW | (f.found ? 0 : WS_VISIBLE), x, y,
                           w, h, nullptr, nullptr, wc.hInstance, nullptr);
-    if (f.found) ShowWindow(s_wnd, SW_SHOWNOACTIVATE);
+    if (f.found) {
+        ShowWindow(s_wnd, SW_SHOWNOACTIVATE);
+        // the console window (console-subsystem exe) goes to the same display's top-left corner
+        if (HWND con = GetConsoleWindow())
+            SetWindowPos(con, nullptr, f.work.left, f.work.top, 0, 0, SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE);
+    }
 }
 
 void host_pump_messages() {

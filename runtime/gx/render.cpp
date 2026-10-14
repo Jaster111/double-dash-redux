@@ -1494,61 +1494,74 @@ void gx_on_retrace() {
 
 // ---------------------------------------------------------------- screenshots (debugging aid)
 // s_png_alpha: save_png writes the alpha channel as grey instead of colour
+// The GPU readback happens here; conversion and PNG encoding run on a worker thread so a screenshot does
+// not stall the game (and the audio) for tens of milliseconds.
+static volatile LONG s_png_pending;
 static void save_png(ID3D11Texture2D* tex, const char* path) {
     flush_batch();
     D3D11_TEXTURE2D_DESC d;
     tex->GetDesc(&d);
-    bool depth = d.Format == DXGI_FORMAT_R32_TYPELESS;
     d.Usage = D3D11_USAGE_STAGING; d.BindFlags = 0; d.CPUAccessFlags = D3D11_CPU_ACCESS_READ; d.MiscFlags = 0;
     ID3D11Texture2D* st = nullptr;
     if (FAILED(s_dev->CreateTexture2D(&d, nullptr, &st))) return;
     s_ctx->CopyResource(st, tex);
     D3D11_MAPPED_SUBRESOURCE m;
     if (FAILED(s_ctx->Map(st, 0, D3D11_MAP_READ, 0, &m))) { st->Release(); return; }
-    static bool com;
-    if (!com) { CoInitializeEx(nullptr, COINIT_MULTITHREADED); com = true; }
-    IWICImagingFactory* f = nullptr;
-    CoCreateInstance(CLSID_WICImagingFactory, nullptr, CLSCTX_INPROC_SERVER, IID_PPV_ARGS(&f));
-    if (f) {
-        IWICStream* stream = nullptr;
-        f->CreateStream(&stream);
-        wchar_t wpath[MAX_PATH];
-        MultiByteToWideChar(CP_UTF8, 0, path, -1, wpath, MAX_PATH);
-        stream->InitializeFromFilename(wpath, GENERIC_WRITE);
-        IWICBitmapEncoder* enc = nullptr;
-        f->CreateEncoder(GUID_ContainerFormatPng, nullptr, &enc);
-        enc->Initialize(stream, WICBitmapEncoderNoCache);
-        IWICBitmapFrameEncode* fr = nullptr;
-        enc->CreateNewFrame(&fr, nullptr);
-        fr->Initialize(nullptr);
-        fr->SetSize(d.Width, d.Height);
-        WICPixelFormatGUID pf = GUID_WICPixelFormat32bppRGBA;
-        fr->SetPixelFormat(&pf);   // the encoder may substitute BGRA (it does on Windows 10)
-        bool bgra = pf != GUID_WICPixelFormat32bppRGBA;
-        // force opaque alpha so the PNG is viewable
-        std::vector<u8> rows((size_t)d.Width * d.Height * 4);
-        for (u32 y = 0; y < d.Height; y++) {
-            memcpy(&rows[(size_t)y * d.Width * 4], (u8*)m.pData + (size_t)y * m.RowPitch, d.Width * 4);
-            for (u32 x = 0; x < d.Width; x++) {
-                u8* px = &rows[((size_t)y * d.Width + x) * 4];
-                if (depth) {   // depth buffer: nearer = brighter, stretched so 0.99..1.0 is visible
+    struct Job { std::string path; u32 w, h; bool depth, alpha; std::vector<u8> px; };
+    Job* job = new Job{path, d.Width, d.Height, d.Format == DXGI_FORMAT_R32_TYPELESS, s_png_alpha, {}};
+    job->px.resize((size_t)d.Width * d.Height * 4);
+    for (u32 y = 0; y < d.Height; y++) memcpy(&job->px[(size_t)y * d.Width * 4], (u8*)m.pData + (size_t)y * m.RowPitch, d.Width * 4);
+    s_ctx->Unmap(st, 0);
+    st->Release();
+    InterlockedIncrement(&s_png_pending);
+    CloseHandle(CreateThread(nullptr, 0, [](void* p) -> DWORD {
+        Job* j = (Job*)p;
+        CoInitializeEx(nullptr, COINIT_MULTITHREADED);
+        IWICImagingFactory* f = nullptr;
+        CoCreateInstance(CLSID_WICImagingFactory, nullptr, CLSCTX_INPROC_SERVER, IID_PPV_ARGS(&f));
+        if (f) {
+            IWICStream* stream = nullptr;
+            f->CreateStream(&stream);
+            wchar_t wpath[MAX_PATH];
+            MultiByteToWideChar(CP_UTF8, 0, j->path.c_str(), -1, wpath, MAX_PATH);
+            stream->InitializeFromFilename(wpath, GENERIC_WRITE);
+            IWICBitmapEncoder* enc = nullptr;
+            f->CreateEncoder(GUID_ContainerFormatPng, nullptr, &enc);
+            enc->Initialize(stream, WICBitmapEncoderNoCache);
+            IWICBitmapFrameEncode* fr = nullptr;
+            enc->CreateNewFrame(&fr, nullptr);
+            fr->Initialize(nullptr);
+            fr->SetSize(j->w, j->h);
+            WICPixelFormatGUID pf = GUID_WICPixelFormat32bppRGBA;
+            fr->SetPixelFormat(&pf);   // the encoder may substitute BGRA (it does on Windows 10)
+            bool bgra = pf != GUID_WICPixelFormat32bppRGBA;
+            // force opaque alpha so the PNG is viewable
+            for (size_t i = 0; i < j->px.size(); i += 4) {
+                u8* px = &j->px[i];
+                if (j->depth) {   // depth buffer: nearer = brighter, stretched so 0.99..1.0 is visible
                     float z;
                     memcpy(&z, px, 4);
                     float v = (1.0f - z) * 255.0f * 40.0f;
                     px[0] = px[1] = px[2] = (u8)(v < 0 ? 0 : v > 255 ? 255 : v);
-                } else if (s_png_alpha) {
+                } else if (j->alpha) {
                     px[0] = px[1] = px[2] = px[3];
                 } else if (bgra) std::swap(px[0], px[2]);
                 px[3] = 255;
             }
+            fr->WritePixels(j->h, j->w * 4, (UINT)j->px.size(), j->px.data());
+            fr->Commit();
+            enc->Commit();
+            fr->Release(); enc->Release(); stream->Release(); f->Release();
         }
-        fr->WritePixels(d.Height, d.Width * 4, (UINT)rows.size(), rows.data());
-        fr->Commit();
-        enc->Commit();
-        fr->Release(); enc->Release(); stream->Release(); f->Release();
-    }
-    s_ctx->Unmap(st, 0);
-    st->Release();
+        delete j;
+        InterlockedDecrement(&s_png_pending);
+        return 0;
+    }, job, 0, nullptr));
+}
+
+// wait until queued screenshots are written (before exiting)
+void gx_wait_screenshots() {
+    for (int i = 0; i < 500 && s_png_pending > 0; i++) Sleep(10);
 }
 
 u32 gx_game_frames() { return s_frame; }

@@ -102,6 +102,16 @@ static void aram_dma() {
 
 // ---------------------------------------------------------------- audio DMA (32 kHz stereo s16)
 static u64 aid_block_ticks(u32 bytes) { return (u64)bytes / 4 * TB_HZ / 32000; }
+// When the block in flight ends.  The next block is timed from here, not from when the (late) event ran:
+// events fire up to a few ms late, and accumulating that lateness made the audio stream slower than
+// 32 kHz, draining the host queue into underruns.  After a long stall it resynchronises instead.
+static u64 s_aid_due;
+static void aid_event(u64);
+
+static void aid_schedule(u64 from) {
+    s_aid_due = from + aid_block_ticks(s_aid_left ? s_aid_left : 32);
+    ev_schedule(s_aid_due, aid_event, 0);
+}
 
 static void aid_event(u64) {
     if (!s_aid_on) return;
@@ -111,7 +121,8 @@ static void aid_event(u64) {
     s_aid_left = s_aid_len;
     s_cr |= CR_AIDINT;
     update_irq();
-    ev_schedule(tb_now() + aid_block_ticks(s_aid_left ? s_aid_left : 32), aid_event, 0);
+    u64 now = tb_now();
+    aid_schedule(now - s_aid_due > TB_HZ / 10 ? now : s_aid_due);
 }
 
 static void aid_control(u16 v) {
@@ -125,7 +136,7 @@ static void aid_control(u16 v) {
         s_cr |= CR_AIDINT;
         update_irq();
         ev_cancel(aid_event);
-        ev_schedule(tb_now() + aid_block_ticks(s_aid_len ? s_aid_len : 32), aid_event, 0);
+        aid_schedule(tb_now());
     } else if (!on) {
         s_aid_on = false;
         ev_cancel(aid_event);
