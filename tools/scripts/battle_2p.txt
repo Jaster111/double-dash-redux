@@ -1,0 +1,84 @@
+# 2-player Balloon Battle on Cookie Land (players are not handed to the AI: battle arenas have no CPU routes).
+#   powershell -File tools\run.ps1 -NoBuild -Seconds 120 -HangExit -Script tools\scripts\battle_2p.txt
+pads 2
+hold 12 START
+wait 48
+hold 12 SL
+wait 48
+hold 12 A
+wait 48
+hold 12 START
+wait 48
+hold 12 SL
+wait 48
+hold 12 A
+wait 48
+hold 12 START
+wait 48
+hold 12 SL
+wait 48
+hold 12 A
+wait 48
+hold 12 START
+wait 48
+hold 12 SL
+wait 48
+hold 12 A
+wait 48
+hold 12 START
+wait 48
+hold 12 SL
+wait 48
+hold 12 A
+wait 48
+hold 12 START
+wait 48
+hold 12 SL
+wait 48
+hold 12 A
+wait 48
+tap START
+wait 60
+tap SD
+wait 30
+tap A
+wait 90
+tap A
+wait 90
+tap SD x2
+wait 30
+tap A
+wait 90
+tap A A@2
+wait 78
+tap A A@2
+wait 78
+tap A A@2
+wait 78
+tap A A@2
+wait 78
+tap A A@2
+wait 78
+tap A A@2
+wait 78
+tap A A@2
+wait 78
+tap A A@2
+wait 78
+tap A A@2
+wait 78
+mark battle running
+hold 250 A A@2 SL
+shot battle_0
+hold 250 A A@2 SL
+shot battle_1
+hold 250 A A@2 SL
+shot battle_2
+hold 250 A A@2 SL
+shot battle_3
+hold 250 A A@2 SL
+shot battle_4
+hold 250 A A@2 SL
+shot battle_5
+mark PASS: battle still rendering
+quit 0

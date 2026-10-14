@@ -148,8 +148,8 @@ PadState host_get_pad(int port) {
             }
         }
     }
-    void dbg_script_pad(u16& buttons, u8& sx, u8& sy);   // host/debug.cpp: DD_SCRIPT
-    if (port == 0) dbg_script_pad(p.buttons, p.sx, p.sy);
+    bool dbg_script_pad(int port, u16& buttons, u8& sx, u8& sy);   // host/debug.cpp: DD_SCRIPT
+    if (dbg_script_pad(port, p.buttons, p.sx, p.sy)) p.connected = true;
     return p;
 }
 

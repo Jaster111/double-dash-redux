@@ -1,0 +1,269 @@
+# Full Grand Prix on autopilot: Star Cup (Sherbet Land, Mushroom City, Yoshi Circuit, DK Mountain), results,
+# standings and - with DD_AUTOPILOT=win - the trophy ceremony.  A is tapped constantly during the races,
+# then only every ~15 s so the cutscenes are not skipped.
+#   powershell -File tools\run.ps1 -NoBuild -Seconds 700 -Laps 1 -HangExit -Autopilot win -Script tools\scripts\gp_cup_auto.txt
+# Ends on the title screen after Congratulations / name entry.  Shots cup_NN every ~5-10 s (python tools\sheet.py sheet.png "shots\cup_*.png").
+hold 12 START
+wait 48
+hold 12 SL
+wait 48
+hold 12 A
+wait 48
+hold 12 START
+wait 48
+hold 12 SL
+wait 48
+hold 12 A
+wait 48
+hold 12 START
+wait 48
+hold 12 SL
+wait 48
+hold 12 A
+wait 48
+hold 12 START
+wait 48
+hold 12 SL
+wait 48
+hold 12 A
+wait 48
+hold 12 START
+wait 48
+hold 12 SL
+wait 48
+hold 12 A
+wait 48
+hold 12 START
+wait 48
+hold 12 SL
+wait 48
+hold 12 A
+wait 48
+hold 12 START
+wait 48
+hold 12 SL
+wait 48
+hold 12 A
+wait 48
+hold 12 START
+wait 48
+hold 12 SL
+wait 48
+hold 12 A
+wait 48
+hold 12 START
+wait 48
+hold 12 SL
+wait 48
+hold 12 A
+wait 48
+hold 12 START
+wait 48
+hold 12 SL
+wait 48
+hold 12 A
+wait 48
+hold 12 START
+wait 48
+hold 12 SL
+wait 48
+hold 12 A
+wait 48
+hold 12 START
+wait 48
+hold 12 SL
+wait 48
+hold 12 A
+wait 48
+hold 12 START
+wait 48
+hold 12 SL
+wait 48
+hold 12 A
+wait 48
+hold 12 START
+wait 48
+hold 12 SL
+wait 48
+hold 12 A
+wait 48
+hold 12 START
+wait 48
+hold 12 SL
+wait 48
+hold 12 A
+wait 48
+hold 12 START
+wait 48
+hold 12 SL
+wait 48
+hold 12 A
+wait 48
+hold 12 START
+wait 48
+hold 12 SL
+wait 48
+hold 12 A
+wait 48
+hold 12 START
+wait 48
+mark race running
+tap A x40
+shot cup_01
+tap A x40
+shot cup_02
+tap A x40
+shot cup_03
+tap A x40
+shot cup_04
+tap A x40
+shot cup_05
+tap A x40
+shot cup_06
+tap A x40
+shot cup_07
+tap A x40
+shot cup_08
+tap A x40
+shot cup_09
+tap A x40
+shot cup_10
+tap A x40
+shot cup_11
+tap A x40
+shot cup_12
+tap A x40
+shot cup_13
+tap A x40
+shot cup_14
+tap A x40
+shot cup_15
+tap A x40
+shot cup_16
+tap A x40
+shot cup_17
+tap A x40
+shot cup_18
+tap A x40
+shot cup_19
+tap A x40
+shot cup_20
+tap A x40
+shot cup_21
+tap A x40
+shot cup_22
+tap A x40
+shot cup_23
+tap A x40
+shot cup_24
+tap A x40
+shot cup_25
+tap A x40
+shot cup_26
+tap A x40
+shot cup_27
+tap A x40
+shot cup_28
+tap A x40
+shot cup_29
+tap A x40
+shot cup_30
+tap A x40
+shot cup_31
+tap A x40
+shot cup_32
+tap A x40
+shot cup_33
+tap A x40
+shot cup_34
+tap A x40
+shot cup_35
+tap A x40
+shot cup_36
+mark cup races done: one A every ~15 s from here
+tap A
+wait 250
+shot cup_37
+wait 250
+shot cup_38
+wait 250
+shot cup_39
+tap A
+wait 250
+shot cup_40
+wait 250
+shot cup_41
+wait 250
+shot cup_42
+tap A
+wait 250
+shot cup_43
+wait 250
+shot cup_44
+wait 250
+shot cup_45
+tap A
+wait 250
+shot cup_46
+wait 250
+shot cup_47
+wait 250
+shot cup_48
+tap A
+wait 250
+shot cup_49
+wait 250
+shot cup_50
+wait 250
+shot cup_51
+tap A
+wait 250
+shot cup_52
+wait 250
+shot cup_53
+wait 250
+shot cup_54
+tap A
+wait 250
+shot cup_55
+wait 250
+shot cup_56
+wait 250
+shot cup_57
+tap A
+wait 250
+shot cup_58
+wait 250
+shot cup_59
+wait 250
+shot cup_60
+tap A
+wait 250
+shot cup_61
+wait 250
+shot cup_62
+wait 250
+shot cup_63
+tap A
+wait 250
+shot cup_64
+wait 250
+shot cup_65
+wait 250
+shot cup_66
+tap A
+wait 250
+shot cup_67
+wait 250
+shot cup_68
+wait 250
+shot cup_69
+tap A
+wait 250
+shot cup_70
+wait 250
+shot cup_71
+wait 250
+shot cup_72
+mark PASS: cup finished
+quit 0

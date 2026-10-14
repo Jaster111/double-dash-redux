@@ -1,20 +1,26 @@
 // Headless testing aids: scripted controller input, course lap patching and a
 // hang detector.  All are off unless their environment variable is set.
 //
-// DD_SCRIPT=file   controller-1 input script, one step per line (times are VI fields, ~60/s):
+// DD_SCRIPT=file   controller input script, one step per line (times are VI fields, ~60/s):
 //                    wait N                  neutral input for N fields
 //                    hold N BTN...           hold buttons / stick directions for N fields
 //                    tap BTN... [xCOUNT]     4 fields pressed + 8 released, COUNT times (default 1)
 //                    mark TEXT               log "[script] TEXT" with the current field / game frame
 //                    shot NAME               save the next presented frame to shots/NAME.png
 //                    waitframes N            wait until the game has rendered N more frames
+//                    dumpram NAME            write main RAM (24 MiB) to shots/NAME.bin
+//                    pads N                  report controllers 1..N as connected (default 1)
 //                    quit [CODE]             exit the process
-//                  BTN: A B X Y Z L R START UP DOWN LEFT RIGHT (d-pad) SL SR SU SD (main stick)
-//                  When the script ends the pad stays neutral.  '#' starts a comment.
+//                  BTN: A B X Y Z L R START UP DOWN LEFT RIGHT (d-pad) SL SR SU SD (main stick), for
+//                  controller 1; BTN@P (e.g. A@2) for controller P (1-4).
+//                  When the script ends the pads stay neutral.  '#' starts a comment.
 // DD_LAPS=N        patch the lap count of every course (BOL header byte 0x18) as it is read from disc.
 // DD_HANG_SECS=S   after the game has started rendering, report a hang when no game frame was
 //                  produced for S seconds (default 6): thread backtraces and device state.
 // DD_HANG_EXIT=1   exit with code 3 after reporting a hang (and 0 on `quit`).
+// DD_AUTOPILOT=1   the game's CPU AI drives the players' karts (their pads are removed from gRaceInfo when a
+//                  race is set up); menus and the pause menu still take the scripted/real input.
+//                  DD_AUTOPILOT=win also keeps kart 0 first in the GP points (reaches the trophy ceremony).
 // Elsewhere: DD_PROF=1 sampling profiler (host/prof.cpp), DD_DBG_SLOW=ms extra time per game frame and
 // DD_NO_SHADER_CACHE=1 (gx/render.cpp), DD_60HZ=0 50 Hz only (hw/exi.cpp).  [hitch] log lines report VI
 // fields that repeated the previous frame while the game was rendering every field (visible stutter).
@@ -39,9 +45,10 @@ enum : u16 {
     PAD_L = 0x0040, PAD_A = 0x0100, PAD_B = 0x0200, PAD_X = 0x0400, PAD_Y = 0x0800, PAD_START = 0x1000,
 };
 
-struct ScriptInput { u16 buttons = 0; int sx = 0, sy = 0; };
+struct PortInput { u16 buttons = 0; int sx = 0, sy = 0; };
+struct ScriptInput { PortInput port[4]; };
 struct Step {
-    enum Kind { Wait, Hold, Tap, Mark, Shot, WaitFrames, Quit } kind;
+    enum Kind { Wait, Hold, Tap, Mark, Shot, WaitFrames, DumpRam, Pads, Quit } kind;
     u32 n = 0;
     ScriptInput in;
     std::string text;
@@ -53,9 +60,17 @@ static u32 s_step_start_field, s_step_start_frame;
 static bool s_step_started;
 static ScriptInput s_cur;
 static bool s_script_on;
+static u32 s_script_pads = 1;
 static int s_script_line_err;
 
-static bool parse_button(const std::string& w, ScriptInput& in) {
+static bool parse_button(std::string w, ScriptInput& si) {
+    int port = 0;
+    if (size_t at = w.find('@'); at != std::string::npos) {
+        port = atoi(w.c_str() + at + 1) - 1;
+        if (port < 0 || port > 3) return false;
+        w.resize(at);
+    }
+    PortInput& in = si.port[port];
     struct { const char* name; u16 b; int sx, sy; } tab[] = {
         {"A", PAD_A}, {"B", PAD_B}, {"X", PAD_X}, {"Y", PAD_Y}, {"Z", PAD_Z}, {"L", PAD_L}, {"R", PAD_R},
         {"START", PAD_START}, {"UP", PAD_UP}, {"DOWN", PAD_DOWN}, {"LEFT", PAD_LEFT}, {"RIGHT", PAD_RIGHT},
@@ -88,6 +103,7 @@ static void load_script(const char* path) {
         auto bad = [&] { LOG("script", "%s:%d: cannot parse: %s", path, ln, line); s_script_line_err = ln; };
         if (cmd == "wait") { st.kind = Step::Wait; is >> st.n; }
         else if (cmd == "waitframes") { st.kind = Step::WaitFrames; is >> st.n; }
+        else if (cmd == "pads") { st.kind = Step::Pads; is >> st.n; if (st.n < 1 || st.n > 4) bad(); }
         else if (cmd == "hold") {
             st.kind = Step::Hold;
             is >> st.n;
@@ -99,8 +115,8 @@ static void load_script(const char* path) {
                 if ((w[0] == 'x' || w[0] == 'X') && w.size() > 1 && isdigit((u8)w[1])) st.n = atoi(w.c_str() + 1);
                 else if (!parse_button(w, st.in)) bad();
             }
-        } else if (cmd == "mark" || cmd == "shot") {
-            st.kind = cmd == "mark" ? Step::Mark : Step::Shot;
+        } else if (cmd == "mark" || cmd == "shot" || cmd == "dumpram") {
+            st.kind = cmd == "mark" ? Step::Mark : cmd == "shot" ? Step::Shot : Step::DumpRam;
             std::getline(is >> std::ws, st.text);
             while (!st.text.empty() && isspace((u8)st.text.back())) st.text.pop_back();
         } else if (cmd == "quit") { st.kind = Step::Quit; is >> st.n; }
@@ -149,6 +165,25 @@ static void script_field() {
             }
             break;
         }
+        case Step::DumpRam: {
+            CreateDirectoryA("shots", nullptr);
+            // snapshot now, write on a worker thread so the game does not stall
+            struct Dump { std::string path; std::vector<u8> ram; };
+            Dump* d = new Dump{"shots/" + st.text + ".bin", std::vector<u8>(host_ptr(0x80000000), host_ptr(0x80000000) + 0x01800000)};
+            LOG("script", "dumpram %s (field %u, game frame %u)", d->path.c_str(), field, frame);
+            CloseHandle(CreateThread(nullptr, 0, [](void* p) -> DWORD {
+                Dump* d = (Dump*)p;
+                if (FILE* f = fopen(d->path.c_str(), "wb")) { fwrite(d->ram.data(), 1, d->ram.size(), f); fclose(f); }
+                delete d;
+                return 0;
+            }, d, 0, nullptr));
+            done = true;
+            break;
+        }
+        case Step::Pads:
+            s_script_pads = st.n;
+            done = true;
+            break;
         case Step::Quit:
             LOG("script", "quit (field %u, game frame %u)", field, frame);
             ExitProcess(st.n);
@@ -160,12 +195,14 @@ static void script_field() {
     }
 }
 
-// called by host_get_pad for port 0: merge the scripted input
-void dbg_script_pad(u16& buttons, u8& sx, u8& sy) {
-    if (!s_script_on) return;
-    buttons |= s_cur.buttons;
-    if (s_cur.sx) sx = (u8)(128 + s_cur.sx * 100);
-    if (s_cur.sy) sy = (u8)(128 + s_cur.sy * 100);
+// called by host_get_pad: merge the scripted input; true if the script connects this port
+bool dbg_script_pad(int port, u16& buttons, u8& sx, u8& sy) {
+    if (!s_script_on || port < 0 || port >= (int)s_script_pads) return false;
+    const PortInput& in = s_cur.port[port];
+    buttons |= in.buttons;
+    if (in.sx) sx = (u8)(128 + in.sx * 100);
+    if (in.sy) sy = (u8)(128 + in.sy * 100);
+    return true;
 }
 
 // ---------------------------------------------------------------- hang detector
@@ -198,8 +235,38 @@ static void hang_field() {
     }
 }
 
+// ---------------------------------------------------------------- autopilot
+// gRaceInfo (GM4P01): KartInfo[8] at 0x803BB2AC, stride 0x18 = {kartDB, pad0, charDB0, pad1, charDB1, ?};
+// CPU karts have null pads.  Nulling the players' pads before the race scene is built hands them to the AI
+// (the menus set them during character selection, long before the race loads).  The GP points live in an
+// s32[8] by kart at 0x803BAFEC (copied to gRaceInfo+0x100 at every race setup); "win" keeps kart 0 more than
+// one race win (10) ahead, so it stays first even when the game ranks the frame it adds a race's points.
+static bool s_autopilot, s_autopilot_win;
+static void autopilot_field() {
+    if (!s_autopilot) return;
+    // race mode (gRaceInfo+8): 1 time trial, 2 GP, 3 versus, 4-7 battles.  Battle arenas have no CPU
+    // routes (the game crashes when the AI drives there), so battles stay under player control.
+    u32 mode = rd32(0x803BB284);
+    if (mode >= 4 && mode <= 7) return;
+    for (u32 k = 0; k < 8; k++)
+        for (u32 d = 0; d < 2; d++) {
+            // only the four controller pads (static KartGamePad[4] at 0x803BF2B8, 0xB8 each); ghosts and
+            // replays have pads of their own on the heap and must keep them
+            u32 a = 0x803BB2B0 + k * 0x18 + d * 8, pad = rd32(a);
+            if (pad < 0x803BF2B8 || pad >= 0x803BF2B8 + 4 * 0xB8) continue;
+            LOG("auto", "kart %u driver %u: pad %08X -> COM (mode %u, field %u)", k, d, pad, mode, vi_field_count());
+            wr32(a, 0);
+        }
+    if (s_autopilot_win) {
+        s32 best = 0;
+        for (u32 k = 1; k < 8; k++) best = std::max(best, (s32)rd32(0x803BAFEC + k * 4));
+        if ((s32)rd32(0x803BAFEC) <= best + 10) wr32(0x803BAFEC, (u32)(best + 11));
+    }
+}
+
 // called once per VI field (hw/vi.cpp)
 void dbg_on_field() {
+    autopilot_field();
     script_field();
     hang_field();
 }
@@ -208,6 +275,10 @@ void dbg_init() {
     if (const char* p = getenv("DD_SCRIPT")) load_script(p);
     s_hang_secs = getenv("DD_HANG_SECS") ? (u32)atoi(getenv("DD_HANG_SECS")) : 6;
     s_hang_exit = getenv("DD_HANG_EXIT") != nullptr;
+    if (const char* a = getenv("DD_AUTOPILOT")) {
+        s_autopilot = true;
+        s_autopilot_win = !_stricmp(a, "win");
+    }
 }
 
 // ---------------------------------------------------------------- course lap patch

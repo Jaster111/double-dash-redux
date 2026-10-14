@@ -1,0 +1,103 @@
+# Time Trials on autopilot: Mushroom Cup / Luigi Circuit, answers "Continue without saving?" with YES,
+# drives one lap to GOAL (the full-screen blur composite after GO used to render black).
+#   powershell -File tools\run.ps1 -NoBuild -Seconds 130 -Laps 1 -Autopilot on -HangExit -Script tools\scripts\tt_auto.txt
+pads 1
+hold 12 START
+wait 48
+hold 12 SL
+wait 48
+hold 12 A
+wait 48
+hold 12 START
+wait 48
+hold 12 SL
+wait 48
+hold 12 A
+wait 48
+hold 12 START
+wait 48
+hold 12 SL
+wait 48
+hold 12 A
+wait 48
+hold 12 START
+wait 48
+hold 12 SL
+wait 48
+hold 12 A
+wait 48
+hold 12 START
+wait 48
+hold 12 SL
+wait 48
+hold 12 A
+wait 48
+hold 12 START
+wait 48
+hold 12 SL
+wait 48
+hold 12 A
+wait 48
+tap START
+wait 60
+tap A
+wait 90
+tap SD
+wait 30
+tap A
+wait 90
+tap A
+wait 90
+tap A
+wait 90
+tap A
+wait 40
+tap SL
+wait 20
+tap A
+wait 90
+# Check Ghost Data: OK -> "Continue without saving?" -> YES
+tap A
+wait 40
+tap SL
+wait 20
+tap A
+wait 90
+mark time trial: course select
+tap A
+wait 78
+tap A
+wait 78
+tap A
+wait 78
+tap A
+wait 78
+tap A
+wait 78
+tap A
+wait 78
+tap A
+wait 78
+tap A
+wait 78
+tap A
+wait 78
+mark race running
+wait 250
+shot tt_0
+wait 250
+shot tt_1
+wait 250
+shot tt_2
+wait 250
+shot tt_3
+wait 250
+shot tt_4
+wait 250
+shot tt_5
+wait 250
+shot tt_6
+wait 250
+shot tt_7
+mark PASS: time trial still rendering
+quit 0

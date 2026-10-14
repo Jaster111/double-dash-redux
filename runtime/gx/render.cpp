@@ -80,8 +80,11 @@ static u32 s_fields;
 // 0x40 no fog, 0x80 fog colour magenta (shows where fog is applied)
 static const u32 dbg_flags = getenv("DD_DBG_FLAGS") ? (u32)strtoul(getenv("DD_DBG_FLAGS"), nullptr, 0) : 0;
 // DD_DBG_FIELD: field number for the per-draw / copy debug dumps and depth probes (0 = all off)
+// (logs cover the 6 fields up to it, or up to DD_DBG_FIELD_END)
 static const u32 dbg_field = getenv("DD_DBG_FIELD") ? (u32)atoi(getenv("DD_DBG_FIELD")) : 0;
-static inline bool dbg_window(u32 f) { return dbg_field && f + 6 >= dbg_field && f <= dbg_field; }
+static const u32 dbg_field_end = getenv("DD_DBG_FIELD_END") ? (u32)atoi(getenv("DD_DBG_FIELD_END")) : dbg_field;
+static int s_dbg_trace_draws;   // DD_DBG_COPYVAL: draws left to trace after the trigger copy
+static inline bool dbg_window(u32 f) { return dbg_field && f + 6 >= dbg_field && f <= dbg_field_end; }
 
 // ---------------------------------------------------------------- helpers
 static ID3DBlob* compile(const std::string& src, const char* entry, const char* target) {
@@ -125,9 +128,17 @@ float4 main(uint id : SV_VertexID) : SV_Position { float2 t = float2((id << 1) &
   return float4(t * float2(2, -2) + float2(-1, 1), p0.x, 1); }
 )";
 static const char* kNullPS = "void main() {}";
+// colour clear of a scissored rectangle through a write mask: colour from cbuffer p1
+static const char* kClearPS = R"(
+cbuffer C : register(b0) { float4 rect; float4 p0; float4 p1; float4 p2; };
+float4 main() : SV_Target { return p1; }
+)";
 static ID3D11VertexShader* s_zclear_vs;
 static ID3D11PixelShader* s_null_ps;
+static ID3D11PixelShader* s_clear_ps;
 static ID3D11DepthStencilState* s_zclear_ds;
+static ID3D11DepthStencilState* s_nodepth_ds;
+static ID3D11BlendState* s_mask_bs[2];   // write RGB only / alpha only
 
 static const char* kBlitPS = R"(
 Texture2D t0 : register(t0); SamplerState s0 : register(s0);
@@ -258,10 +269,23 @@ void gx_render_init() {
     b = compile(kNullPS, "main", "ps_5_0");
     s_dev->CreatePixelShader(b->GetBufferPointer(), b->GetBufferSize(), nullptr, &s_null_ps);
     b->Release();
+    b = compile(kClearPS, "main", "ps_5_0");
+    s_dev->CreatePixelShader(b->GetBufferPointer(), b->GetBufferSize(), nullptr, &s_clear_ps);
+    b->Release();
     {
         D3D11_DEPTH_STENCIL_DESC d = {};
         d.DepthEnable = TRUE; d.DepthFunc = D3D11_COMPARISON_ALWAYS; d.DepthWriteMask = D3D11_DEPTH_WRITE_MASK_ALL;
         s_dev->CreateDepthStencilState(&d, &s_zclear_ds);
+        d.DepthEnable = FALSE; d.DepthWriteMask = D3D11_DEPTH_WRITE_MASK_ZERO;
+        s_dev->CreateDepthStencilState(&d, &s_nodepth_ds);
+        D3D11_BLEND_DESC bd = {};
+        bd.RenderTarget[0].SrcBlend = bd.RenderTarget[0].SrcBlendAlpha = D3D11_BLEND_ONE;
+        bd.RenderTarget[0].DestBlend = bd.RenderTarget[0].DestBlendAlpha = D3D11_BLEND_ZERO;
+        bd.RenderTarget[0].BlendOp = bd.RenderTarget[0].BlendOpAlpha = D3D11_BLEND_OP_ADD;
+        bd.RenderTarget[0].RenderTargetWriteMask = D3D11_COLOR_WRITE_ENABLE_RED | D3D11_COLOR_WRITE_ENABLE_GREEN | D3D11_COLOR_WRITE_ENABLE_BLUE;
+        s_dev->CreateBlendState(&bd, &s_mask_bs[0]);
+        bd.RenderTarget[0].RenderTargetWriteMask = D3D11_COLOR_WRITE_ENABLE_ALPHA;
+        s_dev->CreateBlendState(&bd, &s_mask_bs[1]);
     }
     b = compile(kCopyPS, "main", "ps_5_0");
     s_dev->CreatePixelShader(b->GetBufferPointer(), b->GetBufferSize(), nullptr, &s_copy_ps);
@@ -617,6 +641,12 @@ static ID3D11ShaderResourceView* get_texture(u32 map, u32* out_w, u32* out_h) {
                 return c.srv;
             }
         }
+    }
+    if (dbg_window(s_fields)) {   // debug: textures overlapping an EFB copy that were not substituted
+        for (auto& [ca, c] : s_efb_copies)
+            if (addr >= ca && addr < ca + c.bytes && (addr != ca || c.w != w || c.h != h || c.stale))
+                LOG("gxtex", "field %u: tex %08X %ux%u fmt=%u overlaps EFB copy %08X %ux%u copyfmt=%u stale=%d: not substituted",
+                    s_fields, addr, w, h, fmt, ca, c.w, c.h, c.fmt, (int)c.stale);
     }
     u32 minf = (mode0 >> 5) & 7;
     u32 levels = 1;
@@ -1016,7 +1046,19 @@ void gx_draw(u32 prim, u32 vat, u32 count, const u8* data) {
         memcpy(V, s_verts.data(), count * sizeof(GxOutVertex));
     }
     s_last_draw_verts = V;
-    if (dbg_field && s_fields == dbg_field && s_draws_this_field <= 40) {
+    if ((dbg_field && s_fields == dbg_field && s_draws_this_field <= 40) || s_dbg_trace_draws > 0) {
+        if (s_dbg_trace_draws > 0) {
+            s_dbg_trace_draws--;
+            u32 nst = ((g_gx.bp[0] >> 10) & 15) + 1;
+            LOG("gxdbg", "trace draw#%u stages=%u ntex=%u cmode0=%06X cmode1=%06X zmode=%06X acmp=%06X order0=%06X ksel0=%06X",
+                s_draws_this_field, nst, (g_gx.bp[0] >> 0) & 15, g_gx.bp[0x41] & 0xFFFFFF, g_gx.bp[0x42] & 0xFFFFFF,
+                g_gx.bp[0x40] & 0xFFFFFF, g_gx.bp[0xF3] & 0xFFFFFF, g_gx.bp[0x28] & 0xFFFFFF, g_gx.bp[0xF6] & 0xFFFFFF);
+            for (u32 st = 0; st < nst; st++)
+                LOG("gxdbg", "  stage%u color=%06X alpha=%06X", st, g_gx.bp[0xC0 + st * 2] & 0xFFFFFF, g_gx.bp[0xC1 + st * 2] & 0xFFFFFF);
+            for (u32 m = 0; m < 2; m++)
+                LOG("gxdbg", "  tex%u img0=%06X img3=%06X (addr %08X)", m, tex_reg(0x88, 0xA8, m) & 0xFFFFFF,
+                    tex_reg(0x94, 0xB4, m) & 0xFFFFFF, (tex_reg(0x94, 0xB4, m) & 0xFFFFFF) << 5);
+        }
         auto xff = [](u32 a) { float f; memcpy(&f, &g_gx.xfmem[a], 4); return f; };
         LOG("gxdbg", "draw prim=%u vat=%u n=%u vcd=%08X/%08X vat=%08X/%08X/%08X genmode=%08X", prim, vat, count, g_gx.vcd_lo,
             g_gx.vcd_hi, g_gx.vat_a[vat], g_gx.vat_b[vat], g_gx.vat_c[vat], g_gx.bp[0]);
@@ -1191,12 +1233,37 @@ static void efb_clear_rect(u32 x, u32 y, u32 w, u32 h) {
     D3D11_RECT r = {(LONG)(x * EFB_SCALE), (LONG)(y * EFB_SCALE), (LONG)((x + w) * EFB_SCALE), (LONG)((y + h) * EFB_SCALE)};
     ID3D11DeviceContext1* c1 = nullptr;
     s_ctx->QueryInterface(__uuidof(ID3D11DeviceContext1), (void**)&c1);
+    if (color_upd != alpha_upd && efb_has_alpha()) {
+        // only colour or only alpha: GX keeps the other channel (Time Trials keeps the scene's alpha through
+        // a colour clear and copies it as the opacity of its full-screen composite).  ClearView has no
+        // write mask, so draw the rectangle.
+        BlitCB cbv = {};
+        cbv.p0[0] = 0;
+        memcpy(cbv.p1, col, sizeof col);
+        s_ctx->UpdateSubresource(s_copy_cb, 0, nullptr, &cbv, 0, 0);
+        s_ctx->OMSetRenderTargets(1, &s_efb_rtv, nullptr);
+        D3D11_VIEWPORT vp = {0, 0, (float)(EFB_W * EFB_SCALE), (float)(EFB_H * EFB_SCALE), 0, 1};
+        s_ctx->RSSetViewports(1, &vp);
+        s_ctx->RSSetScissorRects(1, &r);
+        s_ctx->RSSetState(get_rast(0));
+        s_ctx->OMSetBlendState(s_mask_bs[alpha_upd ? 1 : 0], nullptr, 0xFFFFFFFF);
+        s_ctx->OMSetDepthStencilState(s_nodepth_ds, 0);
+        s_ctx->IASetInputLayout(nullptr);
+        s_ctx->IASetPrimitiveTopology(D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
+        s_ctx->VSSetShader(s_zclear_vs, nullptr, 0);
+        s_ctx->VSSetConstantBuffers(0, 1, &s_copy_cb);
+        s_ctx->PSSetShader(s_clear_ps, nullptr, 0);
+        s_ctx->PSSetConstantBuffers(0, 1, &s_copy_cb);
+        s_ctx->Draw(3, 0);
+        s_bind_dirty = true;
+        color_upd = alpha_upd = false;   // done; depth below
+    }
     if (c1) {
         if (color_upd || alpha_upd) c1->ClearView(s_efb_rtv, col, &r, 1);
         if (z_upd) clear_depth_rect(r, z / 16777216.0f);
         c1->Release();
     } else {
-        s_ctx->ClearRenderTargetView(s_efb_rtv, col);
+        if (color_upd || alpha_upd) s_ctx->ClearRenderTargetView(s_efb_rtv, col);
         s_ctx->ClearDepthStencilView(s_dsv, D3D11_CLEAR_DEPTH, z / 16777216.0f, 0);
     }
 }
@@ -1244,7 +1311,16 @@ static void efb_copy(u32 val) {
         LOG("gxdbg", "field %u draw#%u EFB copy val=%06X src=(%u,%u %ux%u) dst=%08X stride=%u xfb=%d clear=%d fmt=%u pe_ctl=%06X yscale=%06X zclear=%06X zupd=%d",
             s_fields, s_draws_this_field, val, sx, sy, sw, sh, dst, g_gx.bp[0x4D], to_xfb, clear, fmt, g_gx.bp[0x43], g_gx.bp[0x4E], g_gx.bp[0x51] & 0xFFFFFF, (int)((g_gx.bp[0x40] >> 4) & 1));
     }
-    if (dbg_field && s_fields == dbg_field) {   // dump colour + depth as they are at each copy of the debug field
+    // DD_DBG_COPYVAL=v: like DD_DBG_FIELD's dumps, but for the first copy with BP 0x52 value v and the 3 after it
+    static const u32 dbg_copyval = getenv("DD_DBG_COPYVAL") ? (u32)strtoul(getenv("DD_DBG_COPYVAL"), nullptr, 0) : 0;
+    static int copyval_left = -1;
+    if (dbg_copyval && copyval_left < 0 && val == dbg_copyval) { copyval_left = 4; s_dbg_trace_draws = 40; }
+    bool copyval_dump = copyval_left > 0;
+    if (copyval_dump) {
+        copyval_left--;
+        LOG("gxdbg", "copy dump: field %u draw#%u val=%06X dst=%08X %ux%u clear=%d", s_fields, s_draws_this_field, val, dst, sw, sh, (int)clear);
+    }
+    if ((dbg_field && s_fields == dbg_field) || copyval_dump) {   // dump colour + depth as they are at each copy
         static int nd;
         char path[64];
         CreateDirectoryA("shots", nullptr);
@@ -1327,7 +1403,7 @@ static void efb_copy(u32 val) {
         rtv->Release();
     }
     if (clear) efb_clear_rect(sx, sy, sw, sh);
-    if (dbg_window(s_fields)) {
+    if (dbg_window(s_fields) && dbg_field_end == dbg_field) {   // (GPU readbacks: too slow for a long window)
         if (!to_xfb && sw > 100) efb_sample_log("after copy");
         depth_probe(clear ? "copy+clear" : "copy", val, to_xfb);
         if (clear && to_xfb) s_probe_draws = true;

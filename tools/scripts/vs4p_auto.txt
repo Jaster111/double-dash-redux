@@ -1,0 +1,84 @@
+# 4-player splitscreen Versus race on autopilot (Mushroom Cup / Luigi Circuit, 50cc), ~60 s of racing.
+#   powershell -File tools\run.ps1 -NoBuild -Seconds 150 -Autopilot on -HangExit -Script tools\scripts\vs4p_auto.txt
+# Menus: title -> How many players? 4 -> P1 vs P2 vs P3 vs P4 -> Versus -> 4 character selects -> course.
+# The [gx] log lines give the splitscreen frame rate.
+pads 4
+
+hold 12 START
+wait 48
+hold 12 SL
+wait 48
+hold 12 A
+wait 48
+hold 12 START
+wait 48
+hold 12 SL
+wait 48
+hold 12 A
+wait 48
+hold 12 START
+wait 48
+hold 12 SL
+wait 48
+hold 12 A
+wait 48
+hold 12 START
+wait 48
+hold 12 SL
+wait 48
+hold 12 A
+wait 48
+hold 12 START
+wait 48
+hold 12 SL
+wait 48
+hold 12 A
+wait 48
+hold 12 START
+wait 48
+hold 12 SL
+wait 48
+hold 12 A
+wait 48
+mark title menu
+tap START
+wait 60
+tap SD x3
+wait 30
+tap A
+wait 90
+tap A A@2 A@3 A@4
+wait 78
+tap A A@2 A@3 A@4
+wait 78
+tap A A@2 A@3 A@4
+wait 78
+tap A A@2 A@3 A@4
+wait 78
+tap A A@2 A@3 A@4
+wait 78
+tap A A@2 A@3 A@4
+wait 78
+tap A A@2 A@3 A@4
+wait 78
+tap A A@2 A@3 A@4
+wait 78
+tap A A@2 A@3 A@4
+wait 78
+tap A A@2 A@3 A@4
+wait 78
+mark race running
+wait 500
+shot vs4p_0
+wait 500
+shot vs4p_1
+wait 500
+shot vs4p_2
+wait 500
+shot vs4p_3
+wait 500
+shot vs4p_4
+wait 500
+shot vs4p_5
+mark PASS: 4P race still rendering
+quit 0
