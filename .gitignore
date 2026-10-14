@@ -19,3 +19,4 @@ crash_ram.bin
 # runtime caches / user settings
 cache/
 settings.ini
+/dist/

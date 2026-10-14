@@ -17,7 +17,7 @@ static HANDLE s_iso = INVALID_HANDLE_VALUE;
 static u64 s_iso_size;
 static u32 s_error;
 
-const char* g_iso_path = "orig/game.iso";
+const char* g_iso_path = "orig/game.iso";   // UTF-8, chosen by host/game_disc.cpp
 void dbg_on_disc_read(u64 off, u32 mar, u32 n);   // host/debug.cpp
 
 bool disc_read(u64 off, void* dst, u32 len) {
@@ -32,7 +32,9 @@ bool disc_read(u64 off, void* dst, u32 len) {
 }
 
 void di_init() {
-    s_iso = CreateFileA(g_iso_path, GENERIC_READ, FILE_SHARE_READ, nullptr, OPEN_EXISTING, FILE_FLAG_RANDOM_ACCESS, nullptr);
+    wchar_t wpath[MAX_PATH * 4];
+    MultiByteToWideChar(CP_UTF8, 0, g_iso_path, -1, wpath, MAX_PATH * 4);
+    s_iso = CreateFileW(wpath, GENERIC_READ, FILE_SHARE_READ, nullptr, OPEN_EXISTING, FILE_FLAG_RANDOM_ACCESS, nullptr);
     if (s_iso == INVALID_HANDLE_VALUE) rt_panic("cannot open disc image %s", g_iso_path);
     LARGE_INTEGER sz;
     GetFileSizeEx(s_iso, &sz);

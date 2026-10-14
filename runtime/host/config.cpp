@@ -1,4 +1,4 @@
-// User settings: settings.ini in the project root (the working directory, see main.cpp find_data_dir).
+// User settings: settings.ini in the data directory (the working directory, see main.cpp find_data_dir).
 // Written with defaults and comments on first run.  Keys are "section.name"; a DD_* environment
 // variable given to cfg_str/cfg_int/... overrides the file (test runs set those, see tools/run.ps1).
 // cfg_set rewrites one value in place and keeps the rest of the file (comments, order) untouched.
@@ -11,6 +11,10 @@ static const char* const SETTINGS_FILE = "settings.ini";
 
 static const char* const DEFAULT_SETTINGS =
     "; Mario Kart: Double Dash!! settings.  Changes take effect the next time the game starts.\n"
+    "\n"
+    "[game]\n"
+    "; disc image (Europe, GM4P01, plain .iso / .gcm); empty = look next to the executable, or ask\n"
+    "disc =\n"
     "\n"
     "[video]\n"
     "; borderless fullscreen on the display the window is on (Alt+Enter or F11 toggles while playing)\n"

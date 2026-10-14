@@ -3,6 +3,8 @@ project(doubledash CXX)
 
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
+# static CRT: the exe runs without the Visual C++ redistributable
+set(CMAKE_MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>")
 
 file(GLOB GENERATED_SOURCES ${CMAKE_SOURCE_DIR}/build/recomp/*.cpp)
 file(GLOB_RECURSE RUNTIME_SOURCES ${CMAKE_SOURCE_DIR}/runtime/*.cpp)
@@ -19,7 +21,7 @@ if(DD_SPCHECK)
 endif()
 
 add_executable(doubledash ${RUNTIME_SOURCES})
-target_link_libraries(doubledash PRIVATE recomp d3d11 dxgi d3dcompiler xinput winmm ole32 windowscodecs)
+target_link_libraries(doubledash PRIVATE recomp d3d11 dxgi d3dcompiler xinput winmm ole32 windowscodecs comdlg32)
 target_include_directories(doubledash PRIVATE ${CMAKE_SOURCE_DIR}/runtime ${CMAKE_SOURCE_DIR}/build/recomp)
 if(MSVC)
   target_compile_options(doubledash PRIVATE /MP /W3 /wd4244 /wd4267 /wd4996 /wd4146)
@@ -28,4 +30,6 @@ if(MSVC)
   # PDB for the profiler / crash logs (DD_PROF); does not affect code generation
   target_compile_options(doubledash PRIVATE /Zi)
   target_link_options(doubledash PRIVATE /STACK:16777216 /DEBUG /OPT:REF /OPT:ICF)
+  # no console window (main.cpp opens one for debug.console / DD_CONSOLE)
+  target_link_options(doubledash PRIVATE /SUBSYSTEM:WINDOWS /ENTRY:mainCRTStartup)
 endif()

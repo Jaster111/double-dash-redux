@@ -26,23 +26,20 @@ static void alloc_memory() {
     if (!VirtualAlloc(g_mem + LOCKED_CACHE, 0x4000, MEM_COMMIT, PAGE_READWRITE)) rt_panic("cannot commit locked cache");
 }
 
-static std::vector<u8> read_file(const char* path) {
-    std::vector<u8> d;
-    FILE* f = fopen(path, "rb");
-    if (!f) return d;
-    fseek(f, 0, SEEK_END);
-    d.resize(ftell(f));
-    fseek(f, 0, SEEK_SET);
-    fread(d.data(), 1, d.size(), f);
-    fclose(f);
-    return d;
-}
-
 static u32 be32(const u8* p) { return ((u32)p[0] << 24) | ((u32)p[1] << 16) | ((u32)p[2] << 8) | p[3]; }
 
-static u32 load_dol(const char* path) {
-    std::vector<u8> dol = read_file(path);
-    if (dol.size() < 0x100) rt_panic("cannot read %s", path);
+// main.dol straight from the disc image (boot.bin+0x420 holds its offset; game_disc.cpp has checked it)
+static u32 load_dol() {
+    u8 hdr[0x440], dh[0x100];
+    if (!disc_read(0, hdr, sizeof hdr)) rt_panic("cannot read disc header");
+    u32 dol_off = be32(hdr + 0x420), dol_size = 0;
+    disc_read(dol_off, dh, sizeof dh);
+    for (int i = 0; i < 18; i++) {
+        u32 off = be32(&dh[4 * i]), size = be32(&dh[0x90 + 4 * i]);
+        if (size && off + size > dol_size) dol_size = off + size;
+    }
+    std::vector<u8> dol(dol_size);
+    if (!dol_size || !disc_read(dol_off, dol.data(), dol_size)) rt_panic("cannot read main.dol from the disc image");
     for (int i = 0; i < 18; i++) {
         u32 off = be32(&dol[0x00 + 4 * i]), addr = be32(&dol[0x48 + 4 * i]), size = be32(&dol[0x90 + 4 * i]);
         if (!size) continue;
@@ -103,37 +100,42 @@ static DWORD WINAPI watchdog(void*) {
     }
 }
 
-// Make the project root (the directory holding orig/) the working directory, so the
-// exe can be started from anywhere (double-click, shortcut, out\Release\...).
+// The data directory (settings.ini, saves\, cache\, doubledash.log) is the executable's directory, or in the
+// development tree the project root (the directory holding orig\game.iso), so the exe can be started from
+// anywhere (double-click, shortcut, out\Release\...).
 static void find_data_dir() {
-    if (GetFileAttributesA("orig/sys/main.dol") != INVALID_FILE_ATTRIBUTES) return;
+    if (GetFileAttributesA("orig/game.iso") != INVALID_FILE_ATTRIBUTES) return;
     char path[MAX_PATH];
     GetModuleFileNameA(nullptr, path, MAX_PATH);
+    if (char* s = strrchr(path, '\\')) *s = 0;
+    std::string exe_dir = path;
     for (int up = 0; up < 6; up++) {
+        char probe[MAX_PATH];
+        snprintf(probe, sizeof probe, "%s\\orig\\game.iso", path);
+        if (GetFileAttributesA(probe) != INVALID_FILE_ATTRIBUTES) { SetCurrentDirectoryA(path); return; }
         char* s = strrchr(path, '\\');
         if (!s) break;
         *s = 0;
-        char probe[MAX_PATH];
-        snprintf(probe, sizeof probe, "%s\\orig\\sys\\main.dol", path);
-        if (GetFileAttributesA(probe) != INVALID_FILE_ATTRIBUTES) { SetCurrentDirectoryA(path); return; }
     }
-    MessageBoxA(nullptr, "Could not find orig\\sys\\main.dol and orig\\game.iso next to the executable.",
-                "Mario Kart: Double Dash!!", MB_ICONERROR);
-    ExitProcess(1);
+    SetCurrentDirectoryA(exe_dir.c_str());
 }
 
 int main(int argc, char** argv) {
     SetProcessDPIAware();
     find_data_dir();
     cfg_load();
-    for (int i = 1; i < argc; i++)
-        if (!strcmp(argv[i], "--iso") && i + 1 < argc) g_iso_path = argv[++i];
+    // a windows-subsystem exe: the log goes to doubledash.log, and to stderr when that is redirected (tools\run.ps1)
+    // or when a console is asked for
+    if (cfg_bool("debug.console", false, "DD_CONSOLE") && !GetStdHandle(STD_ERROR_HANDLE) && AllocConsole())
+        freopen("CONOUT$", "w", stderr);
+    void disc_select(int argc, char** argv);   // host/game_disc.cpp
+    disc_select(argc, argv);
     tb_init();
     alloc_memory();
     cpu_init();
     host_init();
     hw_init();
-    u32 entry = load_dol("orig/sys/main.dol");
+    u32 entry = load_dol();
     setup_boot_info();
     void dbg_init();
     dbg_init();
