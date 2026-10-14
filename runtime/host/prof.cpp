@@ -6,6 +6,7 @@
 //                  fn_8xxxxxxx (run the log through tools/sym.py for their game names).
 // DD_PROF_TOP=N    number of functions per report (default 25); the hottest ones also list their
 //                  main callers (one unwind step from the sampled instruction).
+// DD_PROF_LINES=F  also break the samples of the functions whose name contains F down by source line.
 #include "../common.h"
 #include <windows.h>
 #include <dbghelp.h>
@@ -19,6 +20,7 @@
 
 static HANDLE s_target;
 static u32 s_secs, s_top;
+static const char* s_lines_fn;
 
 // return address of the function executing at ctx (one unwind step); 0 if it cannot be determined
 static u64 caller_of(CONTEXT ctx) {
@@ -59,7 +61,7 @@ static std::string symbol_name(HANDLE proc, u64 addr, u64* start) {
 
 static DWORD WINAPI prof_thread(void*) {
     HANDLE proc = GetCurrentProcess();
-    SymSetOptions(SYMOPT_UNDNAME | SYMOPT_DEFERRED_LOADS);
+    SymSetOptions(SYMOPT_UNDNAME | SYMOPT_DEFERRED_LOADS | SYMOPT_LOAD_LINES);
     SymInitialize(proc, nullptr, TRUE);
     timeBeginPeriod(1);
     SetThreadPriority(GetCurrentThread(), THREAD_PRIORITY_TIME_CRITICAL);
@@ -116,6 +118,27 @@ static DWORD WINAPI prof_thread(void*) {
                 LOG("prof", "           <- %3.0f%% %s", 100.0 * cs[j].second / v[i]->n, cname.c_str());
             }
         }
+        if (s_lines_fn) {   // per source line of the selected functions
+            std::unordered_map<std::string, u32> lines;
+            u32 fn_total = 0;
+            for (auto& [rip, n] : hist) {
+                if (lookup(rip).second.find(s_lines_fn) == std::string::npos) continue;
+                IMAGEHLP_LINE64 li = {sizeof li};
+                DWORD disp = 0;
+                std::string key = "?";
+                if (SymGetLineFromAddr64(proc, rip, &disp, &li)) {
+                    const char* f = strrchr(li.FileName, '\\');
+                    key = std::string(f ? f + 1 : li.FileName) + ":" + std::to_string(li.LineNumber);
+                }
+                lines[key] += n;
+                fn_total += n;
+            }
+            std::vector<std::pair<std::string, u32>> lv(lines.begin(), lines.end());
+            std::sort(lv.begin(), lv.end(), [](auto& x, auto& y) { return x.second > y.second; });
+            LOG("prof", "lines of *%s* (%u samples):", s_lines_fn, fn_total);
+            for (size_t i = 0; i < lv.size() && i < 30; i++)
+                LOG("prof", "  %5.1f%%  %s", 100.0 * lv[i].second / (fn_total ? fn_total : 1), lv[i].first.c_str());
+        }
         hist.clear();
         callers.clear();
         total = 0;
@@ -128,6 +151,7 @@ void prof_init() {
     s_secs = getenv("DD_PROF_SECS") ? (u32)atoi(getenv("DD_PROF_SECS")) : 10;
     s_top = getenv("DD_PROF_TOP") ? (u32)atoi(getenv("DD_PROF_TOP")) : 25;
     if (!s_secs) s_secs = 10;
+    s_lines_fn = getenv("DD_PROF_LINES");
     DuplicateHandle(GetCurrentProcess(), GetCurrentThread(), GetCurrentProcess(), &s_target,
                     THREAD_SUSPEND_RESUME | THREAD_GET_CONTEXT | THREAD_QUERY_INFORMATION, FALSE, 0);
     CreateThread(nullptr, 0, prof_thread, nullptr, 0, nullptr);

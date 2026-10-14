@@ -4,6 +4,7 @@
 #include <windows.h>
 #include <xinput.h>
 #include <timeapi.h>
+#include <algorithm>
 #include <vector>
 
 #pragma comment(lib, "xinput.lib")
@@ -36,8 +37,29 @@ void host_init() {
     RegisterClassA(&wc);
     RECT r = {0, 0, 1280, 960};
     AdjustWindowRect(&r, WS_OVERLAPPEDWINDOW, FALSE);
-    s_wnd = CreateWindowA("DoubleDash", "Mario Kart: Double Dash!!", WS_OVERLAPPEDWINDOW | WS_VISIBLE, CW_USEDEFAULT,
-                          CW_USEDEFAULT, r.right - r.left, r.bottom - r.top, nullptr, nullptr, wc.hInstance, nullptr);
+    int w = r.right - r.left, h = r.bottom - r.top;
+    // DD_MONITOR=N: open centred on display N (1-based, system enumeration order) without taking the focus
+    // (test runs on a second screen)
+    const char* mon = getenv("DD_MONITOR");
+    struct Find { int want, n; RECT work; bool found; } f = {mon ? atoi(mon) : 0, 0, {}, false};
+    if (f.want > 0)
+        EnumDisplayMonitors(nullptr, nullptr, [](HMONITOR m, HDC, LPRECT, LPARAM p) -> BOOL {
+            Find& f = *(Find*)p;
+            if (++f.n != f.want) return TRUE;
+            MONITORINFO mi = {sizeof mi};
+            GetMonitorInfoA(m, &mi);
+            f.work = mi.rcWork;
+            f.found = true;
+            return FALSE;
+        }, (LPARAM)&f);
+    int x = CW_USEDEFAULT, y = CW_USEDEFAULT;
+    if (f.found) {
+        x = f.work.left + std::max(0, (int)(f.work.right - f.work.left - w) / 2);
+        y = f.work.top + std::max(0, (int)(f.work.bottom - f.work.top - h) / 2);
+    }
+    s_wnd = CreateWindowA("DoubleDash", "Mario Kart: Double Dash!!", WS_OVERLAPPEDWINDOW | (f.found ? 0 : WS_VISIBLE), x, y,
+                          w, h, nullptr, nullptr, wc.hInstance, nullptr);
+    if (f.found) ShowWindow(s_wnd, SW_SHOWNOACTIVATE);
 }
 
 void host_pump_messages() {

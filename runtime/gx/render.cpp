@@ -40,8 +40,8 @@ static ID3D11ShaderResourceView* s_efb_copy_src_srv;
 static ID3D11Texture2D* s_depth;
 static ID3D11DepthStencilView* s_dsv;
 static ID3D11ShaderResourceView* s_depth_srv;
-static ID3D11VertexShader* s_vs;
-static ID3D11InputLayout* s_layout;
+static ID3D11VertexShader* s_vs[9];        // by number of stored texture coordinates
+static ID3D11InputLayout* s_layout[9];
 static ID3D11Buffer* s_vb;
 static ID3D11Buffer* s_ib;
 static ID3D11Buffer* s_ps_cb;
@@ -63,7 +63,8 @@ struct PSConstants {
 static_assert(sizeof(PSConstants) % 16 == 0, "cbuffer size");
 
 static const u32 VB_VERTS = 65536 * 4;
-static u32 s_vb_pos;
+static const u32 VB_BYTES = VB_VERTS * sizeof(GxOutVertex);
+static u32 s_vb_pos;   // bytes
 static bool s_ok;
 
 static ID3D11VertexShader* s_blit_vs;
@@ -75,6 +76,7 @@ static ID3D11SamplerState* s_point_clamp;
 
 static u32 s_frame;
 static u32 s_draws_this_field;
+static u32 s_verts_this_field;   // vertices transformed (before line / point expansion)
 static u32 s_fields;
 // DD_DBG_FLAGS bits (renderer debugging): 1 no culling, 2 no depth test, 4 no depth writes, 8 clear depth to 1.0,
 // 0x40 no fog, 0x80 fog colour magenta (shows where fog is applied)
@@ -103,16 +105,16 @@ static ID3DBlob* compile(const std::string& src, const char* entry, const char* 
     return code;
 }
 
-static const char* kVS = R"(
-struct VSIn { float4 pos : POSITION; float4 col0 : COLOR0; float4 col1 : COLOR1;
-  float3 tc0 : TEXCOORD0; float3 tc1 : TEXCOORD1; float3 tc2 : TEXCOORD2; float3 tc3 : TEXCOORD3;
-  float3 tc4 : TEXCOORD4; float3 tc5 : TEXCOORD5; float3 tc6 : TEXCOORD6; float3 tc7 : TEXCOORD7; };
-struct VSOut { float4 pos : SV_Position; float4 col0 : COLOR0; float4 col1 : COLOR1;
-  float3 tc0 : TEXCOORD0; float3 tc1 : TEXCOORD1; float3 tc2 : TEXCOORD2; float3 tc3 : TEXCOORD3;
-  float3 tc4 : TEXCOORD4; float3 tc5 : TEXCOORD5; float3 tc6 : TEXCOORD6; float3 tc7 : TEXCOORD7; };
-VSOut main(VSIn i) { VSOut o; o.pos = i.pos; o.col0 = i.col0; o.col1 = i.col1;
-  o.tc0 = i.tc0; o.tc1 = i.tc1; o.tc2 = i.tc2; o.tc3 = i.tc3; o.tc4 = i.tc4; o.tc5 = i.tc5; o.tc6 = i.tc6; o.tc7 = i.tc7; return o; }
-)";
+// pass-through vertex shader for vertices with `ntex` texture coordinates; the pixel shaders always take 8
+static std::string vs_source(u32 ntex) {
+    std::string s = "struct VSIn { float4 pos : POSITION; float4 col0 : COLOR0; float4 col1 : COLOR1;";
+    for (u32 i = 0; i < ntex; i++) s += " float3 tc" + std::to_string(i) + " : TEXCOORD" + std::to_string(i) + ";";
+    s += " };\nstruct VSOut { float4 pos : SV_Position; float4 col0 : COLOR0; float4 col1 : COLOR1;";
+    for (u32 i = 0; i < 8; i++) s += " float3 tc" + std::to_string(i) + " : TEXCOORD" + std::to_string(i) + ";";
+    s += " };\nVSOut main(VSIn i) { VSOut o; o.pos = i.pos; o.col0 = i.col0; o.col1 = i.col1;";
+    for (u32 i = 0; i < 8; i++) s += " o.tc" + std::to_string(i) + (i < ntex ? " = i.tc" + std::to_string(i) + ";" : " = float3(0, 0, 1);");
+    return s + " return o; }\n";
+}
 
 // full-screen triangle; uv rect in cbuffer
 static const char* kBlitVS = R"(
@@ -246,17 +248,19 @@ void gx_render_init() {
         sv.Format = DXGI_FORMAT_R32_FLOAT; sv.ViewDimension = D3D11_SRV_DIMENSION_TEXTURE2D; sv.Texture2D.MipLevels = 1;
         s_dev->CreateShaderResourceView(s_depth, &sv, &s_depth_srv);
     }
-    ID3DBlob* vs = compile(kVS, "main", "vs_5_0");
-    s_dev->CreateVertexShader(vs->GetBufferPointer(), vs->GetBufferSize(), nullptr, &s_vs);
-    D3D11_INPUT_ELEMENT_DESC il[11] = {
-        {"POSITION", 0, DXGI_FORMAT_R32G32B32A32_FLOAT, 0, 0, D3D11_INPUT_PER_VERTEX_DATA, 0},
-        {"COLOR", 0, DXGI_FORMAT_R32G32B32A32_FLOAT, 0, 16, D3D11_INPUT_PER_VERTEX_DATA, 0},
-        {"COLOR", 1, DXGI_FORMAT_R32G32B32A32_FLOAT, 0, 32, D3D11_INPUT_PER_VERTEX_DATA, 0},
-    };
-    for (int i = 0; i < 8; i++)
-        il[3 + i] = {"TEXCOORD", (UINT)i, DXGI_FORMAT_R32G32B32_FLOAT, 0, (UINT)(48 + 12 * i), D3D11_INPUT_PER_VERTEX_DATA, 0};
-    s_dev->CreateInputLayout(il, 11, vs->GetBufferPointer(), vs->GetBufferSize(), &s_layout);
-    vs->Release();
+    for (u32 nt = 0; nt <= 8; nt++) {
+        ID3DBlob* vs = compile(vs_source(nt), "main", "vs_5_0");
+        s_dev->CreateVertexShader(vs->GetBufferPointer(), vs->GetBufferSize(), nullptr, &s_vs[nt]);
+        D3D11_INPUT_ELEMENT_DESC il[11] = {
+            {"POSITION", 0, DXGI_FORMAT_R32G32B32A32_FLOAT, 0, 0, D3D11_INPUT_PER_VERTEX_DATA, 0},
+            {"COLOR", 0, DXGI_FORMAT_R8G8B8A8_UNORM, 0, 16, D3D11_INPUT_PER_VERTEX_DATA, 0},
+            {"COLOR", 1, DXGI_FORMAT_R8G8B8A8_UNORM, 0, 20, D3D11_INPUT_PER_VERTEX_DATA, 0},
+        };
+        for (u32 i = 0; i < nt; i++)
+            il[3 + i] = {"TEXCOORD", i, DXGI_FORMAT_R32G32B32_FLOAT, 0, 24 + 12 * i, D3D11_INPUT_PER_VERTEX_DATA, 0};
+        s_dev->CreateInputLayout(il, 3 + nt, vs->GetBufferPointer(), vs->GetBufferSize(), &s_layout[nt]);
+        vs->Release();
+    }
     ID3DBlob* b = compile(kBlitVS, "main", "vs_5_0");
     s_dev->CreateVertexShader(b->GetBufferPointer(), b->GetBufferSize(), nullptr, &s_blit_vs);
     b->Release();
@@ -292,7 +296,7 @@ void gx_render_init() {
     b->Release();
 
     D3D11_BUFFER_DESC bd = {};
-    bd.ByteWidth = VB_VERTS * sizeof(GxOutVertex);
+    bd.ByteWidth = VB_BYTES;
     bd.Usage = D3D11_USAGE_DYNAMIC; bd.BindFlags = D3D11_BIND_VERTEX_BUFFER; bd.CPUAccessFlags = D3D11_CPU_ACCESS_WRITE;
     s_dev->CreateBuffer(&bd, nullptr, &s_vb);
     bd.ByteWidth = VB_VERTS * 3 * sizeof(u32);
@@ -722,7 +726,7 @@ static D3D11_RECT scissor_rect() {
     return D3D11_RECT{x0 * EFB_SCALE, y0 * EFB_SCALE, x1 * EFB_SCALE, y1 * EFB_SCALE};
 }
 
-static std::vector<GxOutVertex> s_verts;   // scratch for lines / points (expanded into quads)
+static std::vector<u8> s_lp_verts;   // scratch for lines / points (expanded into quads)
 
 // ---------------------------------------------------------------- draw batching
 // Consecutive draws with identical pixel-pipeline state are merged into one DrawIndexed.  Vertices are
@@ -736,10 +740,11 @@ struct GxDrawState {
     ID3D11ShaderResourceView* srv[8];
     ID3D11SamplerState* smp[8];
     D3D11_RECT scissor;
+    u32 ntex;                              // texture coordinates per vertex (the pixel shader's texgen count)
     PSConstants cb;
 };
 static const u32 BATCH_VERTS = 65536;
-static GxOutVertex* s_bverts;            // [BATCH_VERTS]
+static u8* s_bverts;                     // [BATCH_VERTS] vertices, gx_out_stride(s_batch.ntex) bytes each
 static u32* s_bidx;                      // [BATCH_VERTS * 3]
 static u32 s_bn_verts, s_bn_idx;
 static GxDrawState s_batch;                // state of the draws in the open batch
@@ -750,7 +755,7 @@ static GxDrawState s_bound;                // what the last batch bound
 static u32 s_batches_this_field;
 
 static void batch_init() {
-    s_bverts = new GxOutVertex[BATCH_VERTS];
+    s_bverts = new u8[BATCH_VERTS * sizeof(GxOutVertex)];
     s_bidx = new u32[BATCH_VERTS * 3];
 }
 
@@ -782,13 +787,15 @@ static u32 build_indices(u32 prim, u32 n, u32 base, u32* out) {
 
 static void bind_state(const GxDrawState& st) {
     bool all = s_bind_dirty;
-    if (all) {
-        UINT stride = sizeof(GxOutVertex), voff = 0;
+    if (all || st.ntex != s_bound.ntex) {
+        UINT stride = gx_out_stride(st.ntex), voff = 0;
         s_ctx->IASetVertexBuffers(0, 1, &s_vb, &stride, &voff);
+        s_ctx->IASetInputLayout(s_layout[st.ntex]);
+        s_ctx->VSSetShader(s_vs[st.ntex], nullptr, 0);
+    }
+    if (all) {
         s_ctx->IASetIndexBuffer(s_ib, DXGI_FORMAT_R32_UINT, 0);
-        s_ctx->IASetInputLayout(s_layout);
         s_ctx->IASetPrimitiveTopology(D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
-        s_ctx->VSSetShader(s_vs, nullptr, 0);
         s_ctx->PSSetConstantBuffers(0, 1, &s_ps_cb);
         s_ctx->OMSetRenderTargets(1, &s_efb_rtv, s_dsv);
         D3D11_VIEWPORT vp = {0, 0, (float)(EFB_W * EFB_SCALE), (float)(EFB_H * EFB_SCALE), 0.0f, 1.0f};
@@ -817,68 +824,69 @@ static void bind_state(const GxDrawState& st) {
 static void flush_batch() {
     if (!s_bn_idx) { s_bn_verts = 0; return; }
     D3D11_MAPPED_SUBRESOURCE m;
-    // vertex and index rings: append without synchronisation, discard only when they wrap
-    if (s_vb_pos + s_bn_verts > VB_VERTS) s_vb_pos = 0;
+    // vertex and index rings: append without synchronisation, discard only when they wrap.  The vertex
+    // ring position is kept a multiple of the batch's stride (DrawIndexed takes a base vertex).
+    const u32 stride = gx_out_stride(s_batch.ntex), bytes = s_bn_verts * stride;
+    s_vb_pos = (s_vb_pos + stride - 1) / stride * stride;
+    if (s_vb_pos + bytes > VB_BYTES) s_vb_pos = 0;
     D3D11_MAP mode = s_vb_pos == 0 ? D3D11_MAP_WRITE_DISCARD : D3D11_MAP_WRITE_NO_OVERWRITE;
     static u32 s_ib_pos;
     const u32 ib_cap = VB_VERTS * 3;
     D3D11_MAP imode = D3D11_MAP_WRITE_NO_OVERWRITE;
     if (s_ib_pos + s_bn_idx > ib_cap) { s_ib_pos = 0; imode = D3D11_MAP_WRITE_DISCARD; }
     if (SUCCEEDED(s_ctx->Map(s_vb, 0, mode, 0, &m))) {
-        memcpy((GxOutVertex*)m.pData + s_vb_pos, s_bverts, s_bn_verts * sizeof(GxOutVertex));
+        memcpy((u8*)m.pData + s_vb_pos, s_bverts, bytes);
         s_ctx->Unmap(s_vb, 0);
         if (SUCCEEDED(s_ctx->Map(s_ib, 0, imode, 0, &m))) {
             memcpy((u32*)m.pData + s_ib_pos, s_bidx, s_bn_idx * 4);
             s_ctx->Unmap(s_ib, 0);
             bind_state(s_batch);
-            s_ctx->DrawIndexed(s_bn_idx, s_ib_pos, (INT)s_vb_pos);
+            s_ctx->DrawIndexed(s_bn_idx, s_ib_pos, (INT)(s_vb_pos / stride));
             s_batches_this_field++;
             s_ib_pos += s_bn_idx;
         }
-        s_vb_pos += s_bn_verts;
+        s_vb_pos += bytes;
     }
     s_bn_verts = s_bn_idx = 0;
 }
 
-// lines and points become screen-aligned quads
-static void expand_lines_points(u32 prim, std::vector<GxOutVertex>& v) {
+// lines and points become screen-aligned quads: n vertices `in` -> quads in `out` (at most 4 n vertices)
+static u32 expand_lines_points(u32 prim, const u8* in, u32 n, u32 stride, u8* out) {
     u32 lp = g_gx.bp[0x22];
     float lw = (lp & 0xFF) / 6.0f, ps = ((lp >> 8) & 0xFF) / 6.0f;
-    std::vector<GxOutVertex> out;
-    auto offset = [&](const GxOutVertex& a, float dx, float dy) {
-        GxOutVertex r = a;
-        r.pos[0] += dx * 2.0f / EFB_W * a.pos[3];
-        r.pos[1] -= dy * 2.0f / EFB_H * a.pos[3];
-        return r;
+    u32 nout = 0;
+    auto vin = [&](u32 i) { return (const GxOutVertex*)(in + (size_t)i * stride); };
+    auto emit = [&](const GxOutVertex* a, float dx, float dy) {
+        GxOutVertex* r = gx_out_vertex(out, stride, nout++);
+        memcpy(r, a, stride);
+        r->pos[0] += dx * 2.0f / EFB_W * a->pos[3];
+        r->pos[1] -= dy * 2.0f / EFB_H * a->pos[3];
     };
     if (prim == 7) {
         float h = std::max(ps, 1.0f) * 0.5f;
-        for (auto& p : v) {
-            out.push_back(offset(p, -h, -h)); out.push_back(offset(p, h, -h));
-            out.push_back(offset(p, h, h)); out.push_back(offset(p, -h, h));
+        for (u32 i = 0; i < n; i++) {
+            const GxOutVertex* p = vin(i);
+            emit(p, -h, -h); emit(p, h, -h); emit(p, h, h); emit(p, -h, h);
         }
     } else {
-        std::vector<std::pair<u32, u32>> segs;
-        if (prim == 5) for (u32 i = 0; i + 1 < v.size(); i += 2) segs.push_back({i, i + 1});
-        else for (u32 i = 0; i + 1 < v.size(); i++) segs.push_back({i, i + 1});
         float h = std::max(lw, 1.0f) * 0.5f;
-        for (auto& s : segs) {
-            const GxOutVertex &a = v[s.first], &b = v[s.second];
-            float ax = a.pos[0] / a.pos[3] * EFB_W / 2, ay = -a.pos[1] / a.pos[3] * EFB_H / 2;
-            float bx = b.pos[0] / b.pos[3] * EFB_W / 2, by = -b.pos[1] / b.pos[3] * EFB_H / 2;
+        for (u32 i = 0; i + 1 < n; i += prim == 5 ? 2 : 1) {
+            const GxOutVertex *a = vin(i), *b = vin(i + 1);
+            float ax = a->pos[0] / a->pos[3] * EFB_W / 2, ay = -a->pos[1] / a->pos[3] * EFB_H / 2;
+            float bx = b->pos[0] / b->pos[3] * EFB_W / 2, by = -b->pos[1] / b->pos[3] * EFB_H / 2;
             float dx = bx - ax, dy = by - ay, l = sqrtf(dx * dx + dy * dy);
             float nx = l > 0 ? -dy / l * h : 0, ny = l > 0 ? dx / l * h : h;
-            out.push_back(offset(a, nx, ny)); out.push_back(offset(b, nx, ny));
-            out.push_back(offset(b, -nx, -ny)); out.push_back(offset(a, -nx, -ny));
+            emit(a, nx, ny); emit(b, nx, ny); emit(b, -nx, -ny); emit(a, -nx, -ny);
         }
     }
-    v.swap(out);
+    return nout;
 }
 
 // Debug: watch the centre depth sample and report every transition between "far" and "near".
 static float xf_f(u32 a) { float f; memcpy(&f, &g_gx.xfmem[a], 4); return f; }
 static bool s_probe_draws;   // per-draw depth probing armed (after a copy+clear in the debug window)
-static const GxOutVertex* s_last_draw_verts;   // vertices of the most recent draw (debug dumps)
+static u8* s_last_draw_verts;   // vertices of the most recent draw (debug dumps)
+static u32 s_last_draw_stride;
 static void depth_probe(const char* what, u32 prim, u32 count) {
     flush_batch();
     static ID3D11Texture2D* probe;
@@ -907,8 +915,10 @@ static void depth_probe(const char* what, u32 prim, u32 count) {
         if (s_probe_draws && z < 0.9f && !strcmp(what, "draw")) {
             s_probe_draws = false;
             for (u32 i = 0; i < count && i < 24; i++)
-                LOG("gxprobe", "  v%u pos=(%.3f %.3f %.5f %.3f)", i, s_last_draw_verts[i].pos[0], s_last_draw_verts[i].pos[1],
-                    s_last_draw_verts[i].pos[2], s_last_draw_verts[i].pos[3]);
+            {
+                const float* p = gx_out_vertex(s_last_draw_verts, s_last_draw_stride, i)->pos;
+                LOG("gxprobe", "  v%u pos=(%.3f %.3f %.5f %.3f)", i, p[0], p[1], p[2], p[3]);
+            }
             LOG("gxprobe", "  vcd=%08X/%08X genmode=%08X proj %g %g %g %g %g %g vp %g %g %g %g %g %g", g_gx.vcd_lo, g_gx.vcd_hi, g_gx.bp[0],
                 xf_f(0x1020), xf_f(0x1021), xf_f(0x1022), xf_f(0x1023), xf_f(0x1024), xf_f(0x1025),
                 xf_f(0x101A), xf_f(0x101B), xf_f(0x101C), xf_f(0x101D), xf_f(0x101E), xf_f(0x101F));
@@ -1009,6 +1019,7 @@ static bool compute_state(GxDrawState& st, bool tri, u32 cull) {
     st.depth = (dbg_flags & 2) ? get_depth_always() : get_depth((dbg_flags & 4) != 0);
     st.rast = get_rast(tri && !(dbg_flags & 1) ? cull : 0);
     st.scissor = scissor_rect();
+    st.ntex = std::min(key.num_tex, 8u);
     return true;
 }
 
@@ -1032,20 +1043,25 @@ void gx_draw(u32 prim, u32 vat, u32 count, const u8* data) {
         s_state_tri = tri;
     }
     if (s_bn_verts + nout > BATCH_VERTS) flush_batch();
-    GxOutVertex* V = s_bverts + s_bn_verts;
+    const u32 stride = gx_out_stride(s_batch.ntex);
+    u8* Vb = s_bverts + (size_t)s_bn_verts * stride;
+    auto V = [&](u32 i) { return gx_out_vertex(Vb, stride, i); };
     GxFrameTransform ft;
     ft.inv_efb_w = 1.0f / EFB_W;
     ft.inv_efb_h = 1.0f / EFB_H;
-    if (!tri) s_verts.resize(count);
-    { ProfScope px_(g_prof_xform_ticks); gx_process_vertices(vat, count, data, tri ? V : s_verts.data(), ft); }
-    if (!tri) {
-        expand_lines_points(prim, s_verts);
-        prim = 0;
-        count = (u32)s_verts.size();
-        if (count == 0) return;
-        memcpy(V, s_verts.data(), count * sizeof(GxOutVertex));
+    if (!tri && s_lp_verts.size() < (size_t)count * stride) s_lp_verts.resize((size_t)count * stride);
+    {
+        ProfScope px_(g_prof_xform_ticks);
+        gx_process_vertices(vat, count, data, tri ? Vb : s_lp_verts.data(), s_batch.ntex, ft);
     }
-    s_last_draw_verts = V;
+    s_verts_this_field += count;
+    if (!tri) {
+        count = expand_lines_points(prim, s_lp_verts.data(), count, stride, Vb);
+        prim = 0;
+        if (count == 0) return;
+    }
+    s_last_draw_verts = Vb;
+    s_last_draw_stride = stride;
     if ((dbg_field && s_fields == dbg_field && s_draws_this_field <= 40) || s_dbg_trace_draws > 0) {
         if (s_dbg_trace_draws > 0) {
             s_dbg_trace_draws--;
@@ -1066,9 +1082,9 @@ void gx_draw(u32 prim, u32 vat, u32 count, const u8* data) {
             xff(0x101A), xff(0x101B), xff(0x101C), xff(0x101D), xff(0x101E), xff(0x101F), xff(0x1020), xff(0x1021),
             xff(0x1022), xff(0x1023), xff(0x1024), xff(0x1025), g_gx.xfmem[0x1026]);
         for (u32 i = 0; i < std::min(count, 3u); i++)
-            LOG("gxdbg", "  v%u clip=(%.2f %.2f %.3f %.2f) col0=(%.2f %.2f %.2f %.2f) tc0=(%.3f %.3f %.3f)", i, V[i].pos[0],
-                V[i].pos[1], V[i].pos[2], V[i].pos[3], V[i].col0[0], V[i].col0[1],
-                V[i].col0[2], V[i].col0[3], V[i].tex[0][0], V[i].tex[0][1], V[i].tex[0][2]);
+            LOG("gxdbg", "  v%u clip=(%.2f %.2f %.3f %.2f) col0=%08X tc0=(%.3f %.3f %.3f)", i, V(i)->pos[0],
+                V(i)->pos[1], V(i)->pos[2], V(i)->pos[3], V(i)->col0, s_batch.ntex ? V(i)->tex[0][0] : 0.0f,
+                s_batch.ntex ? V(i)->tex[0][1] : 0.0f, s_batch.ntex ? V(i)->tex[0][2] : 1.0f);
         LOG("gxdbg", "  zmode=%08X cmode0=%08X scis=%08X/%08X off=%08X tev0=%08X/%08X tref=%08X", g_gx.bp[0x40], g_gx.bp[0x41],
             g_gx.bp[0x20], g_gx.bp[0x21], g_gx.bp[0x59], g_gx.bp[0xC0], g_gx.bp[0xC1], g_gx.bp[0x28]);
     }
@@ -1079,7 +1095,7 @@ void gx_draw(u32 prim, u32 vat, u32 count, const u8* data) {
         if (g_gx.bp[0x40] & 1) st_ztest++;
         bool behind = true, zout = true, xyout = true;
         for (u32 i = 0; i < count; i++) {
-            const float* p = V[i].pos;
+            const float* p = V(i)->pos;
             if (p[3] > 0) behind = false;
             if (p[2] >= 0 && p[2] <= p[3]) zout = false;
             if (fabsf(p[0]) <= fabsf(p[3]) && fabsf(p[1]) <= fabsf(p[3])) xyout = false;
@@ -1087,14 +1103,14 @@ void gx_draw(u32 prim, u32 vat, u32 count, const u8* data) {
         st_behind += behind; st_zout += zout; st_xyout += xyout;
         bool big = false;
         for (u32 i = 0; i + 1 < count && !big; i++) {
-            const float* p = V[i].pos;
-            const float* q = V[i + 1].pos;
+            const float* p = V(i)->pos;
+            const float* q = V(i + 1)->pos;
             if (p[3] > 0 && q[3] > 0 && fabsf(p[0] / p[3] - q[0] / q[3]) > 0.8f) big = true;
         }
         bool nearz = false;
         if (g_gx.bp[0x40] & 0x10)
             for (u32 i = 0; i < count; i++) {
-                const float* p = V[i].pos;
+                const float* p = V(i)->pos;
                 if (p[3] > 0 && p[2] / p[3] < 0.9f) nearz = true;
             }
         static u32 st_near;
@@ -1102,7 +1118,7 @@ void gx_draw(u32 prim, u32 vat, u32 count, const u8* data) {
         if (big || nearz || ((g_gx.bp[0x40] & 0x10) && st_draws <= 3)) {   // screen-covering / near-depth draws
             float zmin = 9, zmax = -9, xmin = 9, xmax = -9, ymin = 9, ymax = -9;
             for (u32 i = 0; i < count; i++) {
-                const float* p = V[i].pos;
+                const float* p = V(i)->pos;
                 if (p[3] <= 0) continue;
                 zmin = std::min(zmin, p[2] / p[3]); zmax = std::max(zmax, p[2] / p[3]);
                 xmin = std::min(xmin, p[0] / p[3]); xmax = std::max(xmax, p[0] / p[3]);
@@ -1129,8 +1145,8 @@ void gx_draw(u32 prim, u32 vat, u32 count, const u8* data) {
         // 0x10: skip 1-stage blended screen quads, 0x20: skip multi-stage ones (post-effect debugging)
         u32 stages = ((g_gx.bp[0] >> 10) & 15) + 1;
         if (((dbg_flags & 0x10) && stages == 1) || ((dbg_flags & 0x20) && stages > 1)) {
-            const float* a = V[0].pos;
-            const float* b = V[2].pos;
+            const float* a = V(0)->pos;
+            const float* b = V(2)->pos;
             if (fabsf(a[0] - b[0]) > 1.5f) return;
         }
     }
@@ -1142,9 +1158,9 @@ void gx_draw(u32 prim, u32 vat, u32 count, const u8* data) {
         if (area_dbg && (g_gx.bp[0x41] & 1) && area_logged < 60 && s_fields > 3000) {
             double area = 0;
             for (u32 t = 0; t + 2 < nidx; t += 3) {
-                const float* a = V[I[t] - s_bn_verts].pos;
-                const float* b = V[I[t + 1] - s_bn_verts].pos;
-                const float* d = V[I[t + 2] - s_bn_verts].pos;
+                const float* a = V(I[t] - s_bn_verts)->pos;
+                const float* b = V(I[t + 1] - s_bn_verts)->pos;
+                const float* d = V(I[t + 2] - s_bn_verts)->pos;
                 if (a[3] <= 0 || b[3] <= 0 || d[3] <= 0) continue;
                 auto cl = [](float v) { return v < -1 ? -1.0f : v > 1 ? 1.0f : v; };
                 float ax = cl(a[0] / a[3]), ay = cl(a[1] / a[3]), bx = cl(b[0] / b[3]), by = cl(b[1] / b[3]), dx = cl(d[0] / d[3]), dy = cl(d[1] / d[3]);
@@ -1440,6 +1456,7 @@ void gx_on_bp(u32 reg, u32 old, u32 val) {
 }
 void gx_on_xf(u32 addr, u32 count, const u32* data) {
     if (addr <= 0x101A && addr + count > 0x101A) s_state_valid = false;   // viewport width: range fog constants
+    gx_vertex_on_xf(addr, count);
 }
 void gx_on_cp(u32 reg, u32 val) {}
 
@@ -1454,8 +1471,8 @@ void gx_on_retrace() {
         static u32 last_frame;
         u64 now = GetTickCount64();
         double secs = (double)(now - last_ms + 1) / 1000.0;
-        LOG("gx", "field %u: %.1f fields/s, %.1f game frames/s, %u hitches, %u draws (%u batches) in last field, %zu shaders, %zu textures",
-            s_fields, 250.0 / secs, (s_frame - last_frame) / secs, s_repeats, s_draws_this_field, s_batches_this_field, s_ps_cache.size(),
+        LOG("gx", "field %u: %.1f fields/s, %.1f game frames/s, %u hitches, %u draws (%u batches, %u vertices) in last field, %zu shaders, %zu textures",
+            s_fields, 250.0 / secs, (s_frame - last_frame) / secs, s_repeats, s_draws_this_field, s_batches_this_field, s_verts_this_field, s_ps_cache.size(),
             s_tex_cache.size());
         s_repeats = 0;
         last_ms = now;
@@ -1471,6 +1488,7 @@ void gx_on_retrace() {
         g_prof_fifo_ticks = g_prof_draw_ticks = g_prof_xform_ticks = 0;
     }
     s_draws_this_field = 0;
+    s_verts_this_field = 0;
     s_batches_this_field = 0;
 }
 

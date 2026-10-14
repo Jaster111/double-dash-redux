@@ -1,198 +1,210 @@
 // GX vertex pipeline on the CPU: attribute decoding (CP), transform, lighting
 // and texture coordinate generation (XF).  Produces clip-space vertices for the
 // D3D11 rasterizer.
+//
+// Hot path (tens of thousands of draws per field in splitscreen): attribute readers are specialised per
+// format and picked once per vertex format, XF-derived lighting / texgen setup is cached until an XF write
+// touches it, matrices are loaded once per draw (or when a per-vertex matrix index changes), and only the
+// attributes the enabled stages use are decoded.
 #include "gx.h"
 #include "vertex.h"
 #include <math.h>
+#include <emmintrin.h>
+#include <algorithm>
 
 static inline u32 be32(const u8* p) { return ((u32)p[0] << 24) | ((u32)p[1] << 16) | ((u32)p[2] << 8) | p[3]; }
 static inline u16 be16(const u8* p) { return (u16)((p[0] << 8) | p[1]); }
 
 static inline float xf_float(u32 addr) { float f; memcpy(&f, &g_gx.xfmem[addr], 4); return f; }
 
-// ---------------------------------------------------------------- attribute decoding
-static inline float read_comp(const u8* p, u32 fmt, float scale) {
+// ---------------------------------------------------------------- attribute readers
+static constexpr u32 comp_size(u32 fmt) { return fmt < 2 ? 1 : fmt < 4 ? 2 : 4; }
+template <u32 F> static inline float read_comp(const u8* p, float scale) {
+    if constexpr (F == 0) return p[0] * scale;
+    else if constexpr (F == 1) return (s8)p[0] * scale;
+    else if constexpr (F == 2) return be16(p) * scale;
+    else if constexpr (F == 3) return (s16)be16(p) * scale;
+    else { u32 v = be32(p); float f; memcpy(&f, &v, 4); return f; }
+}
+typedef void (*CompFn)(const u8* s, float scale, float* out);
+template <u32 F, u32 N> static void read_comps(const u8* s, float scale, float* out) {
+    for (u32 i = 0; i < N; i++) out[i] = read_comp<F>(s + i * comp_size(F), scale);
+}
+template <u32 N> static CompFn comp_fn(u32 fmt) {
     switch (fmt) {
-    case 0: return p[0] * scale;
-    case 1: return (s8)p[0] * scale;
-    case 2: return be16(p) * scale;
-    case 3: return (s16)be16(p) * scale;
-    default: { u32 v = be32(p); float f; memcpy(&f, &v, 4); return f; }
+    case 0: return read_comps<0, N>;
+    case 1: return read_comps<1, N>;
+    case 2: return read_comps<2, N>;
+    case 3: return read_comps<3, N>;
+    default: return read_comps<4, N>;
     }
 }
-static const u8 kCompSize[8] = {1, 1, 2, 2, 4, 4, 4, 4};
 
-static void read_color(const u8* p, u32 fmt, float out[4]) {
+// colours are kept in SSE registers (r, g, b, a in lanes 0-3) from decoding to packing
+typedef __m128 (*ColFn)(const u8* p);
+static const __m128 k_inv255 = _mm_set1_ps(1.0f / 255.0f);
+template <u32 F> static __m128 read_color(const u8* p) {
+    if constexpr (F >= 5) {   // RGBA8
+        u32 v;
+        memcpy(&v, p, 4);
+        __m128i z = _mm_setzero_si128(), i = _mm_unpacklo_epi16(_mm_unpacklo_epi8(_mm_cvtsi32_si128((int)v), z), z);
+        return _mm_mul_ps(_mm_cvtepi32_ps(i), k_inv255);
+    }
     u32 r, g, b, a;
-    switch (fmt) {
-    case 0: { u16 v = be16(p); r = (v >> 11) << 3 | (v >> 13); g = ((v >> 5) & 63) << 2 | ((v >> 9) & 3); b = (v & 31) << 3 | ((v >> 2) & 7); a = 255; break; }
-    case 1: case 2: r = p[0]; g = p[1]; b = p[2]; a = 255; break;
-    case 3: { u16 v = be16(p); r = (v >> 12) * 17; g = ((v >> 8) & 15) * 17; b = ((v >> 4) & 15) * 17; a = (v & 15) * 17; break; }
-    case 4: { u32 v = (p[0] << 16) | (p[1] << 8) | p[2]; r = (v >> 18) & 63; g = (v >> 12) & 63; b = (v >> 6) & 63; a = v & 63;
-              r = r << 2 | r >> 4; g = g << 2 | g >> 4; b = b << 2 | b >> 4; a = a << 2 | a >> 4; break; }
-    default: r = p[0]; g = p[1]; b = p[2]; a = p[3]; break;
+    if constexpr (F == 0) { u16 v = be16(p); r = (v >> 11) << 3 | (v >> 13); g = ((v >> 5) & 63) << 2 | ((v >> 9) & 3); b = (v & 31) << 3 | ((v >> 2) & 7); a = 255; }
+    else if constexpr (F == 1 || F == 2) { r = p[0]; g = p[1]; b = p[2]; a = 255; }
+    else if constexpr (F == 3) { u16 v = be16(p); r = (v >> 12) * 17; g = ((v >> 8) & 15) * 17; b = ((v >> 4) & 15) * 17; a = (v & 15) * 17; }
+    else if constexpr (F == 4) {
+        u32 v = (p[0] << 16) | (p[1] << 8) | p[2];
+        r = (v >> 18) & 63; g = (v >> 12) & 63; b = (v >> 6) & 63; a = v & 63;
+        r = r << 2 | r >> 4; g = g << 2 | g >> 4; b = b << 2 | b >> 4; a = a << 2 | a >> 4;
     }
-    out[0] = r / 255.0f; out[1] = g / 255.0f; out[2] = b / 255.0f; out[3] = a / 255.0f;
+    return _mm_mul_ps(_mm_cvtepi32_ps(_mm_setr_epi32((int)r, (int)g, (int)b, (int)a)), k_inv255);
 }
-static const u8 kColorSize[8] = {2, 3, 4, 2, 3, 4, 4, 4};
+static ColFn color_fn(u32 fmt) {
+    switch (fmt) {
+    case 0: return read_color<0>;
+    case 1: return read_color<1>;
+    case 2: return read_color<2>;
+    case 3: return read_color<3>;
+    case 4: return read_color<4>;
+    default: return read_color<5>;
+    }
+}
 
-struct RawVertex {
-    u32 pmidx;
-    u32 tmidx[8];
-    float pos[3];
-    float nrm[3], bin[3], tan[3];
-    bool has_nrm;
-    float col[2][4];
-    bool has_col[2];
-    float tex[8][2];
+// ---------------------------------------------------------------- vertex format plan (per VCD + VAT)
+struct Attr {
+    u32 mode;          // 0 none, 1 direct, 2 idx8, 3 idx16
+    u32 off;           // offset in the vertex
+    int array;
 };
+struct Plan {
+    u32 key[5];
+    bool valid;
+    u32 vsize;
+    int pmidx_off, tmidx_off[8];   // per-vertex matrix indices (-1: from the XF registers)
+    Attr pos; CompFn pos_fn; float pos_scale;
+    Attr nrm; CompFn nrm_fn; float nrm_scale; bool nbt, nidx3; u32 nrm_cs;
+    Attr col[2]; ColFn col_fn[2];
+    Attr tex[8]; CompFn tex_fn[8]; float tex_scale[8];
+};
+static Plan s_plans[8];
 
-struct Decoder {
-    u32 vcd_lo, vcd_hi, a, b, c;
-    // per attribute: mode (0 none, 1 direct, 2 idx8, 3 idx16)
-    u32 pos_mode, nrm_mode, col_mode[2], tex_mode[8];
-    u32 pos_cnt, pos_fmt; float pos_scale;
-    bool nbt, nidx3; u32 nrm_fmt; float nrm_scale;
-    u32 col_fmt[2];
-    u32 tex_cnt[8], tex_fmt[8]; float tex_scale[8];
-    u32 pos_cnt_n;
+static const Plan& get_plan(u32 vat) {
+    Plan& P = s_plans[vat];
+    u32 a = g_gx.vat_a[vat], b = g_gx.vat_b[vat], c = g_gx.vat_c[vat];
+    u32 key[5] = {g_gx.vcd_lo, g_gx.vcd_hi, a, b, c};
+    if (P.valid && !memcmp(P.key, key, sizeof key)) return P;
+    memcpy(P.key, key, sizeof key);
+    P.valid = true;
+    const VtxLayout& L = gx_vertex_layout(vat);
+    u32 lo = key[0], hi = key[1];
+    P.vsize = L.size;
+    P.pmidx_off = (lo & 1) ? (int)L.pmidx : -1;
+    for (int i = 0; i < 8; i++) P.tmidx_off[i] = (lo >> (1 + i) & 1) ? (int)L.tmidx[i] : -1;
+    P.pos = {(lo >> 9) & 3, L.pos, 0};
+    u32 pos_fmt = (a >> 1) & 7;
+    P.pos_fn = (a & 1) ? comp_fn<3>(pos_fmt) : comp_fn<2>(pos_fmt);
+    P.pos_scale = pos_fmt == 4 ? 1.0f : 1.0f / (float)(1u << ((a >> 4) & 31));
+    P.nrm = {(lo >> 11) & 3, L.nrm, 1};
+    P.nbt = (a >> 9) & 1;
+    P.nidx3 = (a >> 31) & 1;
+    u32 nrm_fmt = (a >> 10) & 7;
+    P.nrm_cs = comp_size(nrm_fmt);
+    P.nrm_scale = nrm_fmt == 1 ? 1.0f / 64 : nrm_fmt == 3 ? 1.0f / 16384 : 1.0f;
+    P.nrm_fn = (P.nbt && !(P.nidx3 && P.nrm.mode >= 2)) ? comp_fn<9>(nrm_fmt) : comp_fn<3>(nrm_fmt);
+    for (int i = 0; i < 2; i++) {
+        P.col[i] = {(lo >> (13 + 2 * i)) & 3, L.col[i], 2 + i};
+        P.col_fn[i] = color_fn((a >> (14 + 4 * i)) & 7);
+    }
+    u32 tcnt[8] = {(a >> 21) & 1, b & 1, (b >> 9) & 1, (b >> 18) & 1, (b >> 27) & 1, (c >> 5) & 1, (c >> 14) & 1, (c >> 23) & 1};
+    u32 tfmt[8] = {(a >> 22) & 7, (b >> 1) & 7, (b >> 10) & 7, (b >> 19) & 7, (b >> 28) & 7, (c >> 6) & 7, (c >> 15) & 7, (c >> 24) & 7};
+    u32 tsh[8] = {(a >> 25) & 31, (b >> 4) & 31, (b >> 13) & 31, (b >> 22) & 31, c & 31, (c >> 9) & 31, (c >> 18) & 31, (c >> 27) & 31};
+    for (int i = 0; i < 8; i++) {
+        P.tex[i] = {(hi >> (2 * i)) & 3, L.tex[i], 4 + i};
+        P.tex_fn[i] = tcnt[i] ? comp_fn<2>(tfmt[i]) : comp_fn<1>(tfmt[i]);
+        P.tex_scale[i] = tfmt[i] == 4 ? 1.0f : 1.0f / (float)(1u << tsh[i]);
+    }
+    return P;
+}
 
-    void init(int vat) {
-        vcd_lo = g_gx.vcd_lo; vcd_hi = g_gx.vcd_hi;
-        a = g_gx.vat_a[vat]; b = g_gx.vat_b[vat]; c = g_gx.vat_c[vat];
-        pos_mode = (vcd_lo >> 9) & 3;
-        nrm_mode = (vcd_lo >> 11) & 3;
-        col_mode[0] = (vcd_lo >> 13) & 3;
-        col_mode[1] = (vcd_lo >> 15) & 3;
-        for (int i = 0; i < 8; i++) tex_mode[i] = (vcd_hi >> (2 * i)) & 3;
-        pos_cnt = (a & 1) ? 3 : 2;
-        pos_fmt = (a >> 1) & 7;
-        pos_scale = pos_fmt == 4 ? 1.0f : 1.0f / (float)(1u << ((a >> 4) & 31));
-        nbt = (a >> 9) & 1;
-        nrm_fmt = (a >> 10) & 7;
-        nrm_scale = nrm_fmt == 1 ? 1.0f / 64 : nrm_fmt == 3 ? 1.0f / 16384 : 1.0f;
-        nidx3 = (a >> 31) & 1;
-        col_fmt[0] = (a >> 14) & 7;
-        col_fmt[1] = (a >> 18) & 7;
-        u32 tcnt[8] = {(a >> 21) & 1, b & 1, (b >> 9) & 1, (b >> 18) & 1, (b >> 27) & 1, (c >> 5) & 1, (c >> 14) & 1, (c >> 23) & 1};
-        u32 tfmt[8] = {(a >> 22) & 7, (b >> 1) & 7, (b >> 10) & 7, (b >> 19) & 7, (b >> 28) & 7, (c >> 6) & 7, (c >> 15) & 7, (c >> 24) & 7};
-        u32 tsh[8] = {(a >> 25) & 31, (b >> 4) & 31, (b >> 13) & 31, (b >> 22) & 31, c & 31, (c >> 9) & 31, (c >> 18) & 31, (c >> 27) & 31};
-        for (int i = 0; i < 8; i++) {
-            tex_cnt[i] = tcnt[i] + 1;
-            tex_fmt[i] = tfmt[i];
-            tex_scale[i] = tfmt[i] == 4 ? 1.0f : 1.0f / (float)(1u << tsh[i]);
+// attribute source for one draw: inline data or an indexed array element (array base resolved once)
+struct Src {
+    u32 mode, off, stride;
+    const u8* base;
+    void init(const Attr& a) {
+        mode = a.mode; off = a.off;
+        if (mode >= 2) {
+            stride = g_gx.array_stride[a.array];
+            base = host_ptr(0x80000000u | g_gx.array_base[a.array]);
         }
     }
-
-    // source pointer for an attribute: inline data or indexed array element
-    const u8* src(const u8*& p, u32 mode, int array) {
+    // index-th element pointer for the vertex at v
+    inline const u8* ptr(const u8* v) const {
+        const u8* p = v + off;
         if (mode == 1) return p;
-        u32 idx;
-        if (mode == 2) { idx = p[0]; p += 1; }
-        else { idx = be16(p); p += 2; }
-        return host_ptr(0x80000000u | (g_gx.array_base[array] + idx * g_gx.array_stride[array]));
-    }
-
-    void decode(const u8* p, RawVertex& v) {
-        u32 mi_a = g_gx.xfmem[0x1018], mi_b = g_gx.xfmem[0x1019];
-        v.pmidx = mi_a & 63;
-        v.tmidx[0] = (mi_a >> 6) & 63; v.tmidx[1] = (mi_a >> 12) & 63; v.tmidx[2] = (mi_a >> 18) & 63; v.tmidx[3] = (mi_a >> 24) & 63;
-        v.tmidx[4] = mi_b & 63; v.tmidx[5] = (mi_b >> 6) & 63; v.tmidx[6] = (mi_b >> 12) & 63; v.tmidx[7] = (mi_b >> 18) & 63;
-        if (vcd_lo & 1) v.pmidx = *p++ & 63;
-        for (int i = 0; i < 8; i++) if (vcd_lo >> (1 + i) & 1) v.tmidx[i] = *p++ & 63;
-        // position
-        if (pos_mode) {
-            const u8* s = src(p, pos_mode, 0);
-            u32 cs = kCompSize[pos_fmt];
-            v.pos[0] = read_comp(s, pos_fmt, pos_scale);
-            v.pos[1] = read_comp(s + cs, pos_fmt, pos_scale);
-            v.pos[2] = pos_cnt == 3 ? read_comp(s + 2 * cs, pos_fmt, pos_scale) : 0.0f;
-            if (pos_mode == 1) p += pos_cnt * cs;
-        } else {
-            v.pos[0] = v.pos[1] = v.pos[2] = 0;
-        }
-        // normal (+ binormal/tangent)
-        v.has_nrm = nrm_mode != 0;
-        if (nrm_mode) {
-            u32 cs = kCompSize[nrm_fmt];
-            int nvec = nbt ? 3 : 1;
-            float* dst[3] = {v.nrm, v.bin, v.tan};
-            if (nrm_mode == 1) {
-                for (int k = 0; k < nvec; k++)
-                    for (int j = 0; j < 3; j++) dst[k][j] = read_comp(p + (k * 3 + j) * cs, nrm_fmt, nrm_scale);
-                p += nvec * 3 * cs;
-            } else if (nbt && nidx3) {
-                for (int k = 0; k < 3; k++) {
-                    const u8* s = src(p, nrm_mode, 1);
-                    for (int j = 0; j < 3; j++) dst[k][j] = read_comp(s + (k * 3 + j) * cs, nrm_fmt, nrm_scale);
-                }
-            } else {
-                const u8* s = src(p, nrm_mode, 1);
-                for (int k = 0; k < nvec; k++)
-                    for (int j = 0; j < 3; j++) dst[k][j] = read_comp(s + (k * 3 + j) * cs, nrm_fmt, nrm_scale);
-            }
-        }
-        for (int i = 0; i < 2; i++) {
-            v.has_col[i] = col_mode[i] != 0;
-            if (col_mode[i]) {
-                const u8* s = src(p, col_mode[i], 2 + i);
-                read_color(s, col_fmt[i], v.col[i]);
-                if (col_mode[i] == 1) p += kColorSize[col_fmt[i]];
-            }
-        }
-        for (int i = 0; i < 8; i++) {
-            if (!tex_mode[i]) { v.tex[i][0] = v.tex[i][1] = 0; continue; }
-            const u8* s = src(p, tex_mode[i], 4 + i);
-            u32 cs = kCompSize[tex_fmt[i]];
-            v.tex[i][0] = read_comp(s, tex_fmt[i], tex_scale[i]);
-            v.tex[i][1] = tex_cnt[i] == 2 ? read_comp(s + cs, tex_fmt[i], tex_scale[i]) : 0.0f;
-            if (tex_mode[i] == 1) p += tex_cnt[i] * cs;
-        }
+        u32 idx = mode == 2 ? p[0] : be16(p);
+        return base + (size_t)idx * stride;
     }
 };
 
 // ---------------------------------------------------------------- transform helpers
-static inline void mul34(u32 base, const float in[4], float out[3]) {
-    for (int r = 0; r < 3; r++)
-        out[r] = xf_float(base + r * 4) * in[0] + xf_float(base + r * 4 + 1) * in[1] + xf_float(base + r * 4 + 2) * in[2] +
-                 xf_float(base + r * 4 + 3) * in[3];
+static inline void load_mtx(u32 base, u32 n, float* out) { memcpy(out, &g_gx.xfmem[base], n * 4); }
+static inline void mul34(const float* m, const float in[3], float out[3]) {   // in[3] = 1
+    for (int r = 0; r < 3; r++) out[r] = m[r * 4] * in[0] + m[r * 4 + 1] * in[1] + m[r * 4 + 2] * in[2] + m[r * 4 + 3];
 }
-static inline void mul33(u32 base, const float in[3], float out[3]) {
-    for (int r = 0; r < 3; r++)
-        out[r] = xf_float(base + r * 3) * in[0] + xf_float(base + r * 3 + 1) * in[1] + xf_float(base + r * 3 + 2) * in[2];
+static inline void mul34w(const float* m, const float in[4], float out[3]) {
+    for (int r = 0; r < 3; r++) out[r] = m[r * 4] * in[0] + m[r * 4 + 1] * in[1] + m[r * 4 + 2] * in[2] + m[r * 4 + 3] * in[3];
+}
+static inline void mul33(const float* m, const float in[3], float out[3]) {
+    for (int r = 0; r < 3; r++) out[r] = m[r * 3] * in[0] + m[r * 3 + 1] * in[1] + m[r * 3 + 2] * in[2];
 }
 static inline void normalize3(float v[3]) {
     float l = v[0] * v[0] + v[1] * v[1] + v[2] * v[2];
     if (l > 0) { l = 1.0f / sqrtf(l); v[0] *= l; v[1] *= l; v[2] *= l; }
 }
-static inline float clamp01(float v) { return v < 0 ? 0 : v > 1 ? 1 : v; }
-
-static void unpack_rgba(u32 c, float out[4]) {
-    out[0] = (c >> 24) / 255.0f; out[1] = ((c >> 16) & 255) / 255.0f; out[2] = ((c >> 8) & 255) / 255.0f; out[3] = (c & 255) / 255.0f;
+// normals for lighting: reciprocal square root estimate + one Newton step (~23 bits)
+static inline void normalize3_fast(float v[3]) {
+    float l = v[0] * v[0] + v[1] * v[1] + v[2] * v[2];
+    if (l > 0) {
+        float r = _mm_cvtss_f32(_mm_rsqrt_ss(_mm_set_ss(l)));
+        r = r * (1.5f - 0.5f * l * r * r);
+        v[0] *= r; v[1] *= r; v[2] *= r;
+    }
 }
 
-// ---------------------------------------------------------------- per-draw lighting / texgen setup
-// Everything derived from XF registers is decoded once per draw; the per-vertex loops only do arithmetic.
+static __m128 unpack_rgba(u32 c) {   // XF colour register: RGBA8 with R in the high byte
+    return _mm_mul_ps(_mm_cvtepi32_ps(_mm_setr_epi32((int)(c >> 24), (int)((c >> 16) & 255), (int)((c >> 8) & 255), (int)(c & 255))), k_inv255);
+}
+// [0,1] -> RGBA8, R in the low byte
+static inline u32 pack_rgba8(__m128 c) {
+    __m128i i = _mm_cvtps_epi32(_mm_mul_ps(c, _mm_set1_ps(255.0f)));
+    i = _mm_packs_epi32(i, i);
+    i = _mm_packus_epi16(i, i);
+    return (u32)_mm_cvtsi128_si32(i);
+}
+
+// ---------------------------------------------------------------- lighting / texgen setup (cached)
 struct LightParams {
-    float col[4];
+    __m128 col;
     float pos[3], dir[3];
     float a[3], k[3];
     float pos_n[3];   // normalised position (specular lights use it as the light direction for N.L)
 };
 
-// one lighting channel component set: colour (rgb) or alpha of channel 0 / 1
+// one lighting channel component set: colour (rgb), alpha, or both when their controls are equal
 struct LitComp {
+    __m128 mat, amb;
+    __m128 mask;      // lanes written: rgb (colour), a (alpha) or all four when colour and alpha share the control
     bool lit, mat_vtx, amb_vtx, attn_en, spot;
     u32 diff_fn;
-    float mat[4], amb[4];
     u32 nlights;
     u8 lights[8];
-    int c0, c1;       // component range: 0..3 colour, 3..4 alpha
 };
 
 static void setup_light(u32 l, LightParams& L) {
     u32 base = 0x600 + l * 0x10;
-    unpack_rgba(g_gx.xfmem[base + 3], L.col);
+    L.col = unpack_rgba(g_gx.xfmem[base + 3]);
     for (int i = 0; i < 3; i++) {
         L.a[i] = xf_float(base + 4 + i);
         L.k[i] = xf_float(base + 7 + i);
@@ -203,14 +215,14 @@ static void setup_light(u32 l, LightParams& L) {
     for (int i = 0; i < 3; i++) L.pos_n[i] = ln > 0 ? L.pos[i] / ln : 0.0f;
 }
 
-static void setup_litcomp(u32 ctrl, u32 amb_reg, u32 mat_reg, bool alpha, LitComp& C, u32& lights_used) {
+static void setup_litcomp(u32 ctrl, u32 amb_reg, u32 mat_reg, int c0, int c1, LitComp& C, u32& lights_used) {
     C.mat_vtx = ctrl & 1;
     C.amb_vtx = (ctrl >> 6) & 1;
     C.lit = (ctrl >> 1) & 1;
-    unpack_rgba(mat_reg, C.mat);
-    unpack_rgba(amb_reg, C.amb);
-    C.c0 = alpha ? 3 : 0;
-    C.c1 = alpha ? 4 : 3;
+    C.mat = unpack_rgba(mat_reg);
+    C.amb = unpack_rgba(amb_reg);
+    C.mask = _mm_castsi128_ps(_mm_setr_epi32(c0 <= 0 && c1 > 0 ? -1 : 0, c0 <= 1 && c1 > 1 ? -1 : 0, c0 <= 2 && c1 > 2 ? -1 : 0,
+                                             c0 <= 3 && c1 > 3 ? -1 : 0));
     u32 mask = ((ctrl >> 2) & 15) | (((ctrl >> 11) & 15) << 4);
     C.diff_fn = (ctrl >> 7) & 3;
     C.attn_en = (ctrl >> 9) & 1;
@@ -221,22 +233,15 @@ static void setup_litcomp(u32 ctrl, u32 amb_reg, u32 mat_reg, bool alpha, LitCom
             if (mask & (1u << l)) { C.lights[C.nlights++] = (u8)l; lights_used |= 1u << l; }
 }
 
-static void light_comp(const LitComp& C, const LightParams* lights, const float* vcol, const float pos[3], const float nrm[3],
-                       float* out_comp) {
-    const float* mat = C.mat_vtx ? vcol : C.mat;
-    if (!C.lit) {                                           // lighting disabled: material only
-        for (int k = C.c0; k < C.c1; k++) out_comp[k] = mat[k];
-        return;
-    }
-    const float* amb = C.amb_vtx ? vcol : C.amb;
-    float acc[4] = {amb[0], amb[1], amb[2], amb[3]};
+// ambient + the enabled lights, clamped to [0,1]
+static inline __m128 light_sum(const LitComp& C, const LightParams* lights, __m128 acc, const float pos[3], const float nrm[3]) {
     for (u32 i = 0; i < C.nlights; i++) {
         const LightParams& Lp = lights[C.lights[i]];
         float L[3] = {Lp.pos[0] - pos[0], Lp.pos[1] - pos[1], Lp.pos[2] - pos[2]};
         float dist2 = L[0] * L[0] + L[1] * L[1] + L[2] * L[2];
         float dist = sqrtf(dist2);
         float attn = 1.0f;
-        if (dist > 0) { L[0] /= dist; L[1] /= dist; L[2] /= dist; }
+        if (dist > 0) { float r = 1.0f / dist; L[0] *= r; L[1] *= r; L[2] *= r; }
         float ndotl = nrm[0] * L[0] + nrm[1] * L[1] + nrm[2] * L[2];
         if (C.attn_en) {
             if (C.spot) {
@@ -260,9 +265,18 @@ static void light_comp(const LitComp& C, const LightParams* lights, const float*
         }
         float d = C.diff_fn == 0 ? 1.0f : C.diff_fn == 1 ? ndotl : (ndotl > 0 ? ndotl : 0);
         float sc = d * attn;
-        for (int k = C.c0; k < C.c1; k++) acc[k] += sc * Lp.col[k];
+        acc = _mm_add_ps(acc, _mm_mul_ps(_mm_set1_ps(sc), Lp.col));
     }
-    for (int k = C.c0; k < C.c1; k++) out_comp[k] = clamp01(acc[k]) * mat[k];
+    return _mm_min_ps(_mm_max_ps(acc, _mm_setzero_ps()), _mm_set1_ps(1.0f));
+}
+
+// the channel colour `prev` with C's lanes replaced by its lighting result
+static inline __m128 light_comp(const LitComp& C, const LightParams* lights, __m128 vcol, const float pos[3], const float nrm[3],
+                                __m128 prev) {
+    __m128 mat = C.mat_vtx ? vcol : C.mat;
+    __m128 r = mat;                                         // lighting disabled: material only
+    if (C.lit) r = _mm_mul_ps(light_sum(C, lights, C.amb_vtx ? vcol : C.amb, pos, nrm), mat);
+    return _mm_or_ps(_mm_and_ps(C.mask, r), _mm_andnot_ps(C.mask, prev));
 }
 
 struct TexGen {
@@ -270,132 +284,228 @@ struct TexGen {
     u32 type, row, srcgen, post_base;
 };
 
-// ---------------------------------------------------------------- main entry
-// Decode `count` vertices and transform them into `out` (clip space for D3D).
-void gx_process_vertices(u32 vat, u32 count, const u8* data, GxOutVertex* out, const GxFrameTransform& ft) {
-    Decoder dec;
-    dec.init(vat);
-    const u32 vsize = gx_vertex_layout(vat).size;
+// Everything derived from XF registers other than the matrix indices: decoded when an XF write touched it.
+struct XfSetup {
+    float proj[6];
+    bool ortho;
+    float kx, bx, ky, by, kz, bz;
+    u32 numchans, numtex;
+    bool dualtex;
+    LitComp lit[2][2];     // [channel][colour (or both), alpha]
+    u32 nlit[2];           // LitComps used per channel (1 when colour and alpha share the control)
+    LightParams lights[8];
+    bool any_lit;          // a lit channel: transformed normals needed
+    bool raw_nrm;          // a texgen reads the normal / binormal / tangent
+    u32 tex_rows;          // texture coordinate attributes read by texgens (bit per attribute)
+    TexGen tg[8];
+};
+static XfSetup s_xf;
+static bool s_xf_valid;
+
+void gx_vertex_on_xf(u32 addr, u32 count) {
+    u32 end = addr + count;
+    if (end <= 0x600) return;                       // matrices: loaded per draw
+    if (addr >= 0x1018 && end <= 0x101A) return;    // matrix indices: read per draw
+    s_xf_valid = false;
+}
+
+static void setup_xf(const GxFrameTransform& ft) {
+    XfSetup& S = s_xf;
     const u32* xf = g_gx.xfmem;
-    float proj[7];
-    for (int i = 0; i < 7; i++) memcpy(&proj[i], &xf[0x1020 + i], 4);
-    bool ortho = xf[0x1026] != 0;
+    for (int i = 0; i < 6; i++) memcpy(&S.proj[i], &xf[0x1020 + i], 4);
+    S.ortho = xf[0x1026] != 0;
     float vsx = xf_float(0x101A), vsy = xf_float(0x101B), vsz = xf_float(0x101C);
     float vox = xf_float(0x101D), voy = xf_float(0x101E), voz = xf_float(0x101F);
-    u32 numchans = xf[0x1009] & 3;
-    u32 numtex = xf[0x103F] & 15;
-    if (numtex > 8) numtex = 8;
-    bool dualtex = xf[0x1012] & 1;
     // GX viewport -> EFB window coordinates, expressed in D3D clip space (keeps w for perspective):
     //   x = ((cx * vsx + (vox - 342) * cw) / EFB_W) * 2 - cw,  y = cw - ((cy * vsy + (voy - 342) * cw) / EFB_H) * 2
-    const float kx = vsx * ft.inv_efb_w * 2.0f, bx = (vox - 342.0f) * ft.inv_efb_w * 2.0f - 1.0f;
-    const float ky = vsy * ft.inv_efb_h * 2.0f, by = 1.0f - (voy - 342.0f) * ft.inv_efb_h * 2.0f;
-    const float kz = vsz * (1.0f / 16777216.0f), bz = voz * (1.0f / 16777216.0f);
+    S.kx = vsx * ft.inv_efb_w * 2.0f; S.bx = (vox - 342.0f) * ft.inv_efb_w * 2.0f - 1.0f;
+    S.ky = vsy * ft.inv_efb_h * 2.0f; S.by = 1.0f - (voy - 342.0f) * ft.inv_efb_h * 2.0f;
+    S.kz = vsz * (1.0f / 16777216.0f); S.bz = voz * (1.0f / 16777216.0f);
+    S.numchans = std::min(xf[0x1009] & 3, 2u);
+    S.numtex = std::min(xf[0x103F] & 15, 8u);
+    S.dualtex = xf[0x1012] & 1;
 
-    LitComp lit[2][2];   // [channel][colour, alpha]
-    LightParams lights[8];
     u32 lights_used = 0;
-    for (u32 ch = 0; ch < numchans && ch < 2; ch++) {
-        setup_litcomp(xf[0x100E + ch], xf[0x100A + ch], xf[0x100C + ch], false, lit[ch][0], lights_used);
-        setup_litcomp(xf[0x1010 + ch], xf[0x100A + ch], xf[0x100C + ch], true, lit[ch][1], lights_used);
+    S.any_lit = false;
+    for (u32 ch = 0; ch < S.numchans; ch++) {
+        u32 cc = xf[0x100E + ch], ac = xf[0x1010 + ch];
+        if (cc == ac) {
+            setup_litcomp(cc, xf[0x100A + ch], xf[0x100C + ch], 0, 4, S.lit[ch][0], lights_used);
+            S.nlit[ch] = 1;
+        } else {
+            setup_litcomp(cc, xf[0x100A + ch], xf[0x100C + ch], 0, 3, S.lit[ch][0], lights_used);
+            setup_litcomp(ac, xf[0x100A + ch], xf[0x100C + ch], 3, 4, S.lit[ch][1], lights_used);
+            S.nlit[ch] = 2;
+        }
+        for (u32 i = 0; i < S.nlit[ch]; i++) S.any_lit |= S.lit[ch][i].lit;
     }
-    for (u32 l = 0; l < 8; l++) if (lights_used & (1u << l)) setup_light(l, lights[l]);
+    for (u32 l = 0; l < 8; l++) if (lights_used & (1u << l)) setup_light(l, S.lights[l]);
 
-    TexGen tg[8];
-    for (u32 t = 0; t < numtex; t++) {
+    S.raw_nrm = false;
+    S.tex_rows = 0;
+    for (u32 t = 0; t < S.numtex; t++) {
         u32 info = xf[0x1040 + t];
-        tg[t].stq = (info >> 1) & 1;
-        tg[t].abc1 = (info >> 2) & 1;
-        tg[t].type = (info >> 4) & 7;
-        tg[t].row = (info >> 7) & 31;
-        tg[t].srcgen = (info >> 12) & 7;
+        TexGen& g = S.tg[t];
+        g.stq = (info >> 1) & 1;
+        g.abc1 = (info >> 2) & 1;
+        g.type = (info >> 4) & 7;
+        g.row = (info >> 7) & 31;
+        g.srcgen = (info >> 12) & 7;
         u32 post = xf[0x1050 + t];
-        tg[t].post_norm = (post & 0x100) != 0;
-        tg[t].post_base = 0x500 + (post & 63) * 4;
+        g.post_norm = (post & 0x100) != 0;
+        g.post_base = 0x500 + (post & 63) * 4;
+        if (g.row == 1 || g.row == 3 || g.row == 4) S.raw_nrm = true;
+        if (g.row >= 5 && g.row <= 12) S.tex_rows |= 1u << (g.row - 5);
     }
+    s_xf_valid = true;
+}
+
+// ---------------------------------------------------------------- main entry
+// Decode `count` vertices and transform them into `out` (clip space for D3D), gx_out_stride(ntex) bytes apart.
+void gx_process_vertices(u32 vat, u32 count, const u8* data, u8* out, u32 ntex, const GxFrameTransform& ft) {
+    const Plan& P = get_plan(vat);
+    if (!s_xf_valid) setup_xf(ft);
+    const XfSetup& S = s_xf;
+    const u32 stride = gx_out_stride(ntex);
+    const u32 ngen = std::min(S.numtex, ntex);   // texgens the pixel shader reads
+    const u32 mi_a = g_gx.xfmem[0x1018], mi_b = g_gx.xfmem[0x1019];
+    const u32 def_tm[8] = {(mi_a >> 6) & 63, (mi_a >> 12) & 63, (mi_a >> 18) & 63, (mi_a >> 24) & 63,
+                           mi_b & 63, (mi_b >> 6) & 63, (mi_b >> 12) & 63, (mi_b >> 18) & 63};
+
+    // attributes this draw needs
+    const bool want_nrm = P.nrm.mode && (S.any_lit || S.raw_nrm);
+    const bool xf_nrm = P.nrm.mode && S.any_lit;
+    Src pos_src, nrm_src, col_src[2], tex_src[8];
+    pos_src.init(P.pos);
+    nrm_src.init(P.nrm);
+    for (int i = 0; i < 2; i++) col_src[i].init(P.col[i]);
+    u32 tex_need = 0;
+    for (u32 i = 0; i < 8; i++)
+        if (P.tex[i].mode && (S.tex_rows & (1u << i))) { tex_need |= 1u << i; tex_src[i].init(P.tex[i]); }
+    const u32 nidx_size = P.nrm.mode == 3 ? 2 : 1;
+
+    // matrices: per draw, reloaded when a per-vertex index changes
+    float M[12], N[9], TM[8][12], PM[8][12];
+    u32 cur_pm = ~0u, cur_tm[8];
+    auto load_pos = [&](u32 pm) {
+        cur_pm = pm;
+        load_mtx(pm * 4, 12, M);
+        if (xf_nrm) load_mtx(0x400 + (pm & 31) * 3, 9, N);
+    };
+    if (P.pmidx_off < 0) load_pos(mi_a & 63);
+    for (u32 t = 0; t < ngen; t++) {
+        cur_tm[t] = ~0u;
+        if (S.tg[t].type != 0) continue;
+        if (P.tmidx_off[t] < 0) { cur_tm[t] = def_tm[t]; load_mtx(def_tm[t] * 4, 12, TM[t]); }
+        if (S.dualtex) load_mtx(S.tg[t].post_base, 12, PM[t]);
+    }
+
+    u8 tex_list[8];
+    u32 ntex_list = 0;
+    for (u32 i = 0; i < 8; i++) if (tex_need & (1u << i)) tex_list[ntex_list++] = (u8)i;
 
     for (u32 n = 0; n < count; n++) {
-        RawVertex v;
-        dec.decode(data + (size_t)n * vsize, v);
-        GxOutVertex& o = out[n];
+        const u8* vp = data + (size_t)n * P.vsize;
+        GxOutVertex& o = *gx_out_vertex(out, stride, n);
+        if (P.pmidx_off >= 0) { u32 pm = vp[P.pmidx_off] & 63; if (pm != cur_pm) load_pos(pm); }
         // position
-        float p4[4] = {v.pos[0], v.pos[1], v.pos[2], 1.0f};
+        float pos[3] = {0, 0, 0};
+        if (P.pos.mode) P.pos_fn(pos_src.ptr(vp), P.pos_scale, pos);
         float ep[3];
-        mul34(v.pmidx * 4, p4, ep);
-        float en[3] = {0, 0, 1};
-        if (v.has_nrm) {
-            mul33(0x400 + (v.pmidx & 31) * 3, v.nrm, en);
-            normalize3(en);
-        }
+        mul34(M, pos, ep);
         float cx, cy, cz, cw;
-        if (!ortho) {
-            cx = proj[0] * ep[0] + proj[1] * ep[2];
-            cy = proj[2] * ep[1] + proj[3] * ep[2];
-            cz = proj[4] * ep[2] + proj[5];
+        if (!S.ortho) {
+            cx = S.proj[0] * ep[0] + S.proj[1] * ep[2];
+            cy = S.proj[2] * ep[1] + S.proj[3] * ep[2];
+            cz = S.proj[4] * ep[2] + S.proj[5];
             cw = -ep[2];
         } else {
-            cx = proj[0] * ep[0] + proj[1];
-            cy = proj[2] * ep[1] + proj[3];
-            cz = proj[4] * ep[2] + proj[5];
+            cx = S.proj[0] * ep[0] + S.proj[1];
+            cy = S.proj[2] * ep[1] + S.proj[3];
+            cz = S.proj[4] * ep[2] + S.proj[5];
             cw = 1.0f;
         }
-        o.pos[0] = cx * kx + bx * cw;
-        o.pos[1] = by * cw - cy * ky;
-        o.pos[2] = cz * kz + bz * cw;
+        o.pos[0] = cx * S.kx + S.bx * cw;
+        o.pos[1] = S.by * cw - cy * S.ky;
+        o.pos[2] = cz * S.kz + S.bz * cw;
         o.pos[3] = cw;
-        // colors
-        float vc[2][4];
-        for (int i = 0; i < 2; i++) {
-            if (v.has_col[i]) memcpy(vc[i], v.col[i], sizeof vc[i]);
-            else if (i == 1 && v.has_col[0]) memcpy(vc[1], v.col[0], sizeof vc[1]);   // GX reuses color0
-            else { vc[i][0] = vc[i][1] = vc[i][2] = vc[i][3] = 1.0f; }
+        // normal (+ binormal / tangent)
+        float nrm[9] = {0, 0, 0, 0, 0, 0, 0, 0, 0};
+        float en[3] = {0, 0, 1};
+        if (want_nrm) {
+            if (P.nbt && P.nidx3 && P.nrm.mode >= 2) {
+                const u8* ip = vp + P.nrm.off;
+                for (u32 k = 0; k < 3; k++, ip += nidx_size) {
+                    u32 idx = nidx_size == 1 ? ip[0] : be16(ip);
+                    P.nrm_fn(nrm_src.base + (size_t)idx * nrm_src.stride + k * 3 * P.nrm_cs, P.nrm_scale, nrm + 3 * k);
+                }
+            } else {
+                P.nrm_fn(nrm_src.ptr(vp), P.nrm_scale, nrm);
+            }
+            if (xf_nrm) { mul33(N, nrm, en); normalize3_fast(en); }
         }
-        float outc[2][4] = {{1, 1, 1, 1}, {1, 1, 1, 1}};
-        for (u32 ch = 0; ch < 2; ch++) {
-            if (ch >= numchans) { memcpy(outc[ch], vc[ch], sizeof outc[ch]); continue; }
-            light_comp(lit[ch][0], lights, vc[ch], ep, en, outc[ch]);
-            light_comp(lit[ch][1], lights, vc[ch], ep, en, outc[ch]);
-        }
-        memcpy(o.col0, outc[0], sizeof o.col0);
-        memcpy(o.col1, outc[1], sizeof o.col1);
+        // colours
+        const __m128 one = _mm_set1_ps(1.0f);
+        __m128 vc0 = P.col[0].mode ? P.col_fn[0](col_src[0].ptr(vp)) : one;
+        __m128 vc1 = P.col[1].mode ? P.col_fn[1](col_src[1].ptr(vp)) : P.col[0].mode ? vc0 : one;   // GX reuses color0
+        const __m128 vc[2] = {vc0, vc1};
+        __m128 outc[2] = {vc0, vc1};   // channels beyond numchans pass the vertex colour through
+        for (u32 ch = 0; ch < S.numchans; ch++)
+            for (u32 i = 0; i < S.nlit[ch]; i++) outc[ch] = light_comp(S.lit[ch][i], S.lights, vc[ch], ep, en, outc[ch]);
+        o.col0 = pack_rgba8(outc[0]);
+        o.col1 = pack_rgba8(outc[1]);
         // texture coordinate generation
-        for (u32 t = 0; t < numtex; t++) {
-            const TexGen& g = tg[t];
+        float tc[8][2];
+        for (u32 j = 0; j < ntex_list; j++) {
+            u32 i = tex_list[j];
+            tc[i][1] = 0.0f;
+            P.tex_fn[i](tex_src[i].ptr(vp), P.tex_scale[i], tc[i]);
+        }
+        for (u32 t = 0; t < ngen; t++) {
+            const TexGen& g = S.tg[t];
             float in[4] = {0, 0, 1, 1};
             switch (g.row) {
-            case 0: in[0] = v.pos[0]; in[1] = v.pos[1]; in[2] = v.pos[2]; break;
-            case 1: if (v.has_nrm) { in[0] = v.nrm[0]; in[1] = v.nrm[1]; in[2] = v.nrm[2]; } else { in[0] = in[1] = 0; in[2] = 1; } break;
+            case 0: in[0] = pos[0]; in[1] = pos[1]; in[2] = pos[2]; break;
+            case 1: if (P.nrm.mode) { in[0] = nrm[0]; in[1] = nrm[1]; in[2] = nrm[2]; } else { in[0] = in[1] = 0; in[2] = 1; } break;
             case 2: break;
-            case 3: if (dec.nbt) { in[0] = v.tan[0]; in[1] = v.tan[1]; in[2] = v.tan[2]; } else { in[0] = in[1] = in[2] = 0; } break;
-            case 4: if (dec.nbt) { in[0] = v.bin[0]; in[1] = v.bin[1]; in[2] = v.bin[2]; } else { in[0] = in[1] = in[2] = 0; } break;
-            default: if (g.row >= 5 && g.row <= 12) { in[0] = v.tex[g.row - 5][0]; in[1] = v.tex[g.row - 5][1]; } break;
+            case 3: if (P.nrm.mode && P.nbt) { in[0] = nrm[6]; in[1] = nrm[7]; in[2] = nrm[8]; } else { in[0] = in[1] = in[2] = 0; } break;
+            case 4: if (P.nrm.mode && P.nbt) { in[0] = nrm[3]; in[1] = nrm[4]; in[2] = nrm[5]; } else { in[0] = in[1] = in[2] = 0; } break;
+            default:
+                if (g.row >= 5 && g.row <= 12) {
+                    u32 a = g.row - 5;
+                    if (tex_need & (1u << a)) { in[0] = tc[a][0]; in[1] = tc[a][1]; } else { in[0] = in[1] = 0; }
+                }
+                break;
             }
             if (!g.abc1) in[2] = 1.0f;
             float r[3] = {0, 0, 1};
             if (g.type == 0) {
-                u32 mb = v.tmidx[t] * 4;
-                if (g.stq) mul34(mb, in, r);
+                if (P.tmidx_off[t] >= 0) {
+                    u32 tm = vp[P.tmidx_off[t]] & 63;
+                    if (tm != cur_tm[t]) { cur_tm[t] = tm; load_mtx(tm * 4, 12, TM[t]); }
+                }
+                const float* m = TM[t];
+                if (g.stq) mul34w(m, in, r);
                 else {
-                    for (int k = 0; k < 2; k++)
-                        r[k] = xf_float(mb + k * 4) * in[0] + xf_float(mb + k * 4 + 1) * in[1] + xf_float(mb + k * 4 + 2) * in[2] +
-                               xf_float(mb + k * 4 + 3) * in[3];
+                    for (int k = 0; k < 2; k++) r[k] = m[k * 4] * in[0] + m[k * 4 + 1] * in[1] + m[k * 4 + 2] * in[2] + m[k * 4 + 3] * in[3];
                     r[2] = 1.0f;
+                }
+                if (S.dualtex) {
+                    if (g.post_norm) normalize3(r);
+                    float r2[3] = {r[0], r[1], r[2]};
+                    mul34(PM[t], r2, r);
                 }
             } else if (g.type == 1) {
                 // emboss: offset a previously generated coordinate (approximation: copy source)
                 if (g.srcgen < t) { r[0] = o.tex[g.srcgen][0]; r[1] = o.tex[g.srcgen][1]; r[2] = o.tex[g.srcgen][2]; }
             } else {
                 // color texgen: s,t from the lit channel colour
-                const float* cc = g.type == 2 ? o.col0 : o.col1;
+                float cc[4];
+                _mm_storeu_ps(cc, outc[g.type == 2 ? 0 : 1]);
                 r[0] = cc[0]; r[1] = cc[1]; r[2] = 1.0f;
-            }
-            if (dualtex && g.type == 0) {
-                if (g.post_norm) normalize3(r);
-                float in2[4] = {r[0], r[1], r[2], 1.0f};
-                mul34(g.post_base, in2, r);
             }
             o.tex[t][0] = r[0]; o.tex[t][1] = r[1]; o.tex[t][2] = r[2];
         }
-        for (u32 t = numtex; t < 8; t++) { o.tex[t][0] = o.tex[t][1] = 0; o.tex[t][2] = 1; }
+        for (u32 t = ngen; t < ntex; t++) { o.tex[t][0] = o.tex[t][1] = 0; o.tex[t][2] = 1; }
     }
 }
