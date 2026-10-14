@@ -16,5 +16,6 @@ shots/
 *.raw
 crash_ram.bin
 
-# runtime caches
+# runtime caches / user settings
 cache/
+settings.ini

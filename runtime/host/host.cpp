@@ -12,15 +12,59 @@
 static HWND s_wnd;
 static bool s_quit;
 static bool s_keys[256];
+static bool s_fullscreen;
+static WINDOWPLACEMENT s_windowed_placement = {sizeof(WINDOWPLACEMENT)};
 
 HWND host_window() { return s_wnd; }
+
+// Borderless fullscreen: a popup window covering the monitor the window is on.  With the flip-model
+// swap chain DWM hands it the display directly (independent flip), so this costs nothing over
+// exclusive fullscreen and switches instantly.
+static void set_fullscreen(bool on) {
+    if (on == s_fullscreen) return;
+    s_fullscreen = on;
+    if (on) {
+        GetWindowPlacement(s_wnd, &s_windowed_placement);
+        MONITORINFO mi = {sizeof mi};
+        GetMonitorInfoA(MonitorFromWindow(s_wnd, MONITOR_DEFAULTTONEAREST), &mi);
+        SetWindowLongA(s_wnd, GWL_STYLE, WS_POPUP | WS_VISIBLE);
+        SetWindowPos(s_wnd, HWND_TOP, mi.rcMonitor.left, mi.rcMonitor.top, mi.rcMonitor.right - mi.rcMonitor.left,
+                     mi.rcMonitor.bottom - mi.rcMonitor.top, SWP_FRAMECHANGED | SWP_NOOWNERZORDER | SWP_NOACTIVATE);
+        LOG("host", "fullscreen %ldx%ld at %ld,%ld", mi.rcMonitor.right - mi.rcMonitor.left,
+            mi.rcMonitor.bottom - mi.rcMonitor.top, mi.rcMonitor.left, mi.rcMonitor.top);
+    } else {
+        SetWindowLongA(s_wnd, GWL_STYLE, WS_OVERLAPPEDWINDOW | WS_VISIBLE);
+        if (s_windowed_placement.showCmd == SW_SHOWNORMAL) s_windowed_placement.showCmd = SW_SHOWNOACTIVATE;
+        SetWindowPlacement(s_wnd, &s_windowed_placement);
+        SetWindowPos(s_wnd, nullptr, 0, 0, 0, 0,
+                     SWP_FRAMECHANGED | SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER | SWP_NOOWNERZORDER | SWP_NOACTIVATE);
+        LOG("host", "windowed");
+    }
+}
 
 static LRESULT CALLBACK wndproc(HWND h, UINT m, WPARAM w, LPARAM l) {
     switch (m) {
     case WM_CLOSE: s_quit = true; return 0;
-    case WM_KEYDOWN: case WM_SYSKEYDOWN: s_keys[w & 255] = true; return 0;
+    case WM_SYSKEYDOWN:
+        if (w == VK_RETURN && (l & (1 << 29))) {   // Alt+Enter (not passed on as Start)
+            if (!(l & (1 << 30))) { set_fullscreen(!s_fullscreen); cfg_set("video.fullscreen", s_fullscreen ? "1" : "0"); }
+            return 0;
+        }
+        if (w == VK_F4) break;   // Alt+F4: close
+        s_keys[w & 255] = true;
+        return 0;
+    case WM_KEYDOWN:
+        if (w == VK_F11) {
+            if (!(l & (1 << 30))) { set_fullscreen(!s_fullscreen); cfg_set("video.fullscreen", s_fullscreen ? "1" : "0"); }
+            return 0;
+        }
+        s_keys[w & 255] = true;
+        return 0;
     case WM_KEYUP: case WM_SYSKEYUP: s_keys[w & 255] = false; return 0;
     case WM_KILLFOCUS: memset(s_keys, 0, sizeof s_keys); return 0;
+    case WM_SETCURSOR:
+        if (s_fullscreen && LOWORD(l) == HTCLIENT) { SetCursor(nullptr); return TRUE; }
+        break;
     }
     return DefWindowProcA(h, m, w, l);
 }
@@ -35,7 +79,8 @@ void host_init() {
     wc.lpszClassName = "DoubleDash";
     wc.hCursor = LoadCursor(nullptr, IDC_ARROW);
     RegisterClassA(&wc);
-    RECT r = {0, 0, 1280, 960};
+    RECT r = {0, 0, std::clamp(cfg_int("video.window_width", 1280), 160, 16384),
+              std::clamp(cfg_int("video.window_height", 960), 120, 16384)};
     AdjustWindowRect(&r, WS_OVERLAPPEDWINDOW, FALSE);
     int w = r.right - r.left, h = r.bottom - r.top;
     // DD_MONITOR=N: open centred on display N (1-based, system enumeration order) without taking the focus
@@ -65,6 +110,11 @@ void host_init() {
         if (HWND con = GetConsoleWindow())
             SetWindowPos(con, nullptr, f.work.left, f.work.top, 0, 0, SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE);
     }
+    if (cfg_bool("video.fullscreen", false, "DD_FULLSCREEN")) set_fullscreen(true);   // on the window's display
+}
+
+void host_shutdown() {
+    for (int port = 0; port < 4; port++) host_set_rumble(port, false);
 }
 
 void host_pump_messages() {
@@ -106,6 +156,20 @@ static bool xinput_state(int port, XINPUT_STATE* out) {
     }
     *out = sl.st;
     return sl.connected;
+}
+
+// GameCube pads have one on/off rumble motor; on an XInput pad it drives both motors
+void host_set_rumble(int port, bool on) {
+    static const bool enabled = cfg_bool("input.rumble", true);
+    static const int strength = std::clamp(cfg_int("input.rumble_strength", 100), 0, 100);
+    static bool state[4];
+    if (port < 0 || port >= 4 || state[port] == on || (on && !enabled)) return;
+    state[port] = on;
+    static int logged;
+    if (logged < 6) LOG("host", "pad %d rumble %s%s", port + 1, on ? "on" : "off", ++logged == 6 ? " (not logged further)" : "");
+    XINPUT_VIBRATION v = {};
+    if (on) v.wLeftMotorSpeed = v.wRightMotorSpeed = (WORD)(65535 * strength / 100);
+    XInputSetState(port, &v);
 }
 
 PadState host_get_pad(int port) {
@@ -176,7 +240,11 @@ PadState host_get_pad(int port) {
         }
     }
     bool dbg_script_pad(int port, u16& buttons, u8& sx, u8& sy);   // host/debug.cpp: DD_SCRIPT
-    if (dbg_script_pad(port, p.buttons, p.sx, p.sy)) p.connected = true;
+    if (dbg_script_pad(port, p.buttons, p.sx, p.sy)) {
+        p.connected = true;
+        if (p.buttons & PAD_L) p.l = 255;   // scripted L/R: fully pressed analog trigger, as on the keyboard
+        if (p.buttons & PAD_R) p.r = 255;
+    }
     return p;
 }
 

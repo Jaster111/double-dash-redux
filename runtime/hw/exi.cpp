@@ -17,11 +17,6 @@ struct IplDevice : ExiDevice {
         // defaults matching a freshly-initialised console (English, stereo)
         sram[0x12] = 0;          // language: English
         sram[0x13] = 0x2C;       // flags: stereo | bit3/5 set like a configured console
-        // ntd bit 6: EuRGB60 (PAL60) enabled in the IPL settings.  The game then offers 60 / 50 Hz at boot
-        // (60 Hz preselected, chosen automatically when its countdown runs out).  50 Hz judders on 60 Hz and
-        // faster monitors, so this is the default; DD_60HZ=0 leaves it off (50 Hz, no prompt).
-        const char* hz60 = getenv("DD_60HZ");
-        if (!hz60 || atoi(hz60)) sram[0x11] |= 0x40;
         // SRAM-ex: memory card flash IDs (zero) and their checksums (~sum), as left by the IPL
         // after unlocking a card; memcard.cpp replaces them with the ID a loaded card was formatted with
         sram[0x3A] = sram[0x3B] = 0xFF;
@@ -109,6 +104,13 @@ static void update_irq() {
 }
 
 void exi_init() {
+    // ntd bit 6: EuRGB60 (PAL60) enabled in the IPL settings.  The game then offers 60 / 50 Hz at boot
+    // (60 Hz preselected, chosen automatically when its countdown runs out).  50 Hz judders on 60 Hz and
+    // faster monitors, so this is the default; video.pal60 = 0 / DD_60HZ=0 leaves it off (50 Hz, no prompt).
+    if (cfg_bool("video.pal60", true, "DD_60HZ")) {
+        s_ipl.sram[0x11] |= 0x40;
+        s_ipl.fix_checksum();
+    }
     s_ch[0].dev[0] = memcard_device(0);
     s_ch[0].dev[1] = &s_ipl;
     s_ch[1].dev[0] = memcard_device(1);

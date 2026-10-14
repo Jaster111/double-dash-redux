@@ -302,7 +302,7 @@ void rt_poll(CPU* c) {
     if (now - s_last_pump > TB_HZ / 200) {
         s_last_pump = now;
         host_pump_messages();
-        if (host_should_quit()) ExitProcess(0);
+        if (host_should_quit()) { host_shutdown(); ExitProcess(0); }
     }
     os_check_interrupts(c);
     // idle: no current thread means the scheduler is spinning in its idle loop

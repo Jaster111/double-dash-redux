@@ -64,7 +64,7 @@ void init() {
         if (s_wav) wav_write_header();
         else LOG("audio", "cannot create %s", f);
     }
-    if (getenv("DD_MUTE")) { LOG("audio", "muted (DD_MUTE)"); return; }
+    if (cfg_bool("audio.mute", false, "DD_MUTE")) { LOG("audio", "muted (audio.mute / DD_MUTE)"); return; }
     CoInitializeEx(nullptr, COINIT_MULTITHREADED);   // may already be initialised; either way is fine
     HRESULT hr = XAudio2Create(&s_xa, 0, XAUDIO2_DEFAULT_PROCESSOR);
     if (SUCCEEDED(hr)) hr = s_xa->CreateMasteringVoice(&s_master);
@@ -77,7 +77,10 @@ void init() {
     wf.nAvgBytesPerSec = RATE * 4;
     if (SUCCEEDED(hr)) hr = s_xa->CreateSourceVoice(&s_voice, &wf);
     if (SUCCEEDED(hr)) hr = s_voice->Start();
-    if (SUCCEEDED(hr) && getenv("DD_VOLUME")) s_master->SetVolume((float)atof(getenv("DD_VOLUME")));
+    if (SUCCEEDED(hr)) {   // DD_VOLUME: 0..1 factor; audio.volume: percent
+        float vol = getenv("DD_VOLUME") ? (float)atof(getenv("DD_VOLUME")) : cfg_int("audio.volume", 100) / 100.0f;
+        if (vol != 1.0f) s_master->SetVolume(std::clamp(vol, 0.0f, 1.0f));
+    }
     if (FAILED(hr)) {
         LOG("audio", "XAudio2 init failed (%08X): no sound output", (u32)hr);
         s_voice = nullptr;

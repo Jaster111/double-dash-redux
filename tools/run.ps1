@@ -10,6 +10,7 @@
 # -Hz60 is given or DD_60HZ is already set.
 # -Autopilot sets DD_AUTOPILOT (the game's AI drives the players' karts; win = also keep P1 first in GP points).
 # -Monitor N opens the window on display N without taking the focus (DD_MONITOR), -Mute sets DD_MUTE (no audio device).
+# Test runs are windowed (DD_FULLSCREEN=0) unless DD_FULLSCREEN is set; settings.ini supplies everything else.
 # Other DD_* variables already set in the environment are passed through.
 param([int]$Seconds = 20, [switch]$NoBuild, [int]$Lines = 80, [string]$Script, [int]$Laps = -1, [switch]$HangExit,
       [switch]$Sym, [string]$Card, [switch]$NewCard, [switch]$Hz60, [string]$Autopilot, [int]$Monitor = 0, [switch]$Mute)
@@ -31,6 +32,7 @@ if ($HangExit) { $env:DD_HANG_EXIT = "1" }
 if ($Autopilot) { $env:DD_AUTOPILOT = $Autopilot }
 if ($Monitor -gt 0) { $env:DD_MONITOR = "$Monitor" }
 if ($Mute) { $env:DD_MUTE = "1" }
+if (-not $env:DD_FULLSCREEN) { $env:DD_FULLSCREEN = "0" }   # test runs stay windowed whatever settings.ini says
 Remove-Item doubledash.log -ErrorAction SilentlyContinue
 $p = Start-Process -FilePath out\Release\doubledash.exe -PassThru -RedirectStandardError out\stderr.txt -RedirectStandardOutput out\stdout.txt
 $null = $p.Handle   # keep the handle open so ExitCode is available afterwards

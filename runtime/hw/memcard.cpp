@@ -254,13 +254,13 @@ void MemoryCard::done_event(u64 slot) {
 
 }  // namespace
 
-// DD_MEMCARD_A / DD_MEMCARD_B: card image path, or "none" for an empty slot.
+// memcard.slot_a / slot_b (DD_MEMCARD_A / DD_MEMCARD_B): card image path, or "none" for an empty slot.
 // Default: slot A = saves/MemoryCardA.raw (created and formatted on first run), slot B empty.
 ExiDevice* memcard_device(int slot) {
-    const char* env = getenv(slot == 0 ? "DD_MEMCARD_A" : "DD_MEMCARD_B");
-    std::string path = env ? env : slot == 0 ? "saves/MemoryCardA.raw" : "none";
+    const char* cfg = slot == 0 ? cfg_str("memcard.slot_a", "DD_MEMCARD_A") : cfg_str("memcard.slot_b", "DD_MEMCARD_B");
+    std::string path = cfg ? cfg : slot == 0 ? "saves/MemoryCardA.raw" : "none";
     if (path.empty() || path == "none") return nullptr;
-    if (!env) CreateDirectoryA("saves", nullptr);
+    if (path.rfind("saves/", 0) == 0) CreateDirectoryA("saves", nullptr);
     MemoryCard* c = new MemoryCard(slot, path);
     if (!c->open()) { delete c; return nullptr; }
     return s_cards[slot] = c;

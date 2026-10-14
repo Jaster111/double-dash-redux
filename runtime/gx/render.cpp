@@ -212,7 +212,7 @@ static void shader_cache_load();
 
 void gx_render_init() {
     HWND wnd = host_window();
-    if (const char* sc = getenv("DD_EFB_SCALE")) EFB_SCALE = atoi(sc) > 0 ? atoi(sc) : 3;
+    EFB_SCALE = std::clamp(cfg_int("video.internal_scale", 3, "DD_EFB_SCALE"), 1, 8);
     DXGI_SWAP_CHAIN_DESC sd = {};
     sd.BufferCount = 2;
     sd.BufferDesc.Format = DXGI_FORMAT_R8G8B8A8_UNORM;
@@ -225,6 +225,13 @@ void gx_render_init() {
     HRESULT hr = D3D11CreateDeviceAndSwapChain(nullptr, D3D_DRIVER_TYPE_HARDWARE, nullptr, 0, &fl, 1, D3D11_SDK_VERSION, &sd,
                                                &s_swap, &s_dev, nullptr, &s_ctx);
     if (FAILED(hr)) { LOG("gx", "D3D11 init failed (%08lX): rendering disabled", hr); return; }
+    {   // fullscreen is borderless (host.cpp handles Alt+Enter): keep DXGI from switching to exclusive mode
+        IDXGIFactory* factory = nullptr;
+        if (SUCCEEDED(s_swap->GetParent(__uuidof(IDXGIFactory), (void**)&factory))) {
+            factory->MakeWindowAssociation(wnd, DXGI_MWA_NO_ALT_ENTER | DXGI_MWA_NO_WINDOW_CHANGES);
+            factory->Release();
+        }
+    }
     {   // queue at most one frame ahead of the GPU: the game is CPU-paced, more only adds input latency
         IDXGIDevice1* dxgi = nullptr;
         if (SUCCEEDED(s_dev->QueryInterface(__uuidof(IDXGIDevice1), (void**)&dxgi))) {

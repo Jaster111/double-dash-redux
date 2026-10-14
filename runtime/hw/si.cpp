@@ -34,6 +34,11 @@ static void pad_status(int ch, u32* hi, u32* lo) {
     *lo = ((u32)p.cx << 24) | ((u32)p.cy << 16) | ((u32)p.l << 8) | p.r;
 }
 
+// Output word / poll command 0x40 0x03 MM: MM bits 0-1 are the rumble motor (0 stop, 1 on, 2 hard stop)
+static void pad_command(int ch, u32 cmd) {
+    if ((cmd >> 16 & 0xFF) == 0x40) host_set_rumble(ch, (cmd & 3) == 1);
+}
+
 // run one command on a device; returns response length or -1 for no device
 static int device_transfer(int ch, const u8* in, int inlen, u8* out) {
     if (!host_get_pad(ch).connected) return -1;
@@ -42,6 +47,7 @@ static int device_transfer(int ch, const u8* in, int inlen, u8* out) {
         out[0] = 0x09; out[1] = 0x00; out[2] = 0x00;
         return 3;
     case 0x40: {            // direct status
+        pad_command(ch, (u32)in[0] << 16 | (u32)in[1] << 8 | in[2]);
         u32 hi, lo;
         pad_status(ch, &hi, &lo);
         for (int i = 0; i < 4; i++) { out[i] = (u8)(hi >> (24 - 8 * i)); out[4 + i] = (u8)(lo >> (24 - 8 * i)); }
@@ -115,7 +121,10 @@ static u32 si_read32(u32 off) {
 static void si_write32(u32 off, u32 v) {
     if (off < 0x30) {
         int ch = off / 12;
-        if (off % 12 == 0) s_out[ch] = v;
+        if (off % 12 == 0) {
+            s_out[ch] = v;
+            pad_command(ch, v);
+        }
         return;
     }
     switch (off) {

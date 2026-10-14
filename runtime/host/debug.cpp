@@ -22,7 +22,8 @@
 //                  race is set up); menus and the pause menu still take the scripted/real input.
 //                  DD_AUTOPILOT=win also keeps kart 0 first in the GP points (reaches the trophy ceremony).
 // Elsewhere: DD_PROF=1 sampling profiler (host/prof.cpp), DD_DBG_SLOW=ms extra time per game frame and
-// DD_NO_SHADER_CACHE=1 (gx/render.cpp), DD_60HZ=0 50 Hz only (hw/exi.cpp).  [hitch] log lines report VI
+// DD_NO_SHADER_CACHE=1 (gx/render.cpp), DD_60HZ=0 50 Hz only (hw/exi.cpp).  Most user
+// settings live in settings.ini (host/config.cpp); their DD_* variables override it.  [hitch] log lines report VI
 // fields that repeated the previous frame while the game was rendering every field (visible stutter).
 #include "../common.h"
 #include <windows.h>
@@ -188,6 +189,7 @@ static void script_field() {
             LOG("script", "quit (field %u, game frame %u)", field, frame);
             void gx_wait_screenshots();   // gx/render.cpp: PNGs are written on worker threads
             gx_wait_screenshots();
+            host_shutdown();
             ExitProcess(st.n);
         }
         if (!done) return;

@@ -45,3 +45,12 @@ u32 guest_func_addr(const char* name);   // matched-name lookup (debug helpers)
 // host
 void host_pump_messages();
 bool host_should_quit();
+void host_set_rumble(int port, bool on);   // controller motor (SI output buffer)
+void host_shutdown();                      // before exiting: stop rumble
+
+// settings.ini (host/config.cpp): key "section.name"; the DD_* variable env, if given and set, wins
+void cfg_load();
+const char* cfg_str(const char* key, const char* env = nullptr);
+int cfg_int(const char* key, int def, const char* env = nullptr);
+bool cfg_bool(const char* key, bool def, const char* env = nullptr);
+void cfg_set(const char* key, const char* value);   // also rewrites the value in settings.ini

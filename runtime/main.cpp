@@ -125,6 +125,7 @@ static void find_data_dir() {
 int main(int argc, char** argv) {
     SetProcessDPIAware();
     find_data_dir();
+    cfg_load();
     for (int i = 1; i < argc; i++)
         if (!strcmp(argv[i], "--iso") && i + 1 < argc) g_iso_path = argv[++i];
     tb_init();
