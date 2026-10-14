@@ -1,0 +1,6 @@
+# THP movie check: no input from boot, screenshots every 100 fields (the opening movie plays when the
+# title screen is left idle).  Check shots/movie_*.png, and DD_WAV for its audio.
+pads 1
+autoshot movie 100
+wait 6000
+quit 0
