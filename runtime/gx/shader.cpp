@@ -185,12 +185,16 @@ std::string gx_shader_source(const ShaderKey& k) {
                 s += fmt("    ar = (ar%s) >> 8;\n", sc);
             } else {
                 u32 mode = (ashift << 1) | asub;
+                // R8/GR16/BGR24 compare this stage's colour inputs a and b; only A8 compares the alpha inputs
                 switch (mode) {
-                case 0: s += "    int ar = ad_ + ((aa_ > ab_) ? ac_ : 0);\n"; break;   // R8 compare uses red: approximate with alpha
-                case 1: s += "    int ar = ad_ + ((aa_ == ab_) ? ac_ : 0);\n"; break;
+                case 0: s += "    int ar = ad_ + ((ca.r > cb.r) ? ac_ : 0);\n"; break;
+                case 1: s += "    int ar = ad_ + ((ca.r == cb.r) ? ac_ : 0);\n"; break;
+                case 2: s += "    int ar = ad_ + (((ca.r | (ca.g << 8)) > (cb.r | (cb.g << 8))) ? ac_ : 0);\n"; break;
+                case 3: s += "    int ar = ad_ + (((ca.r | (ca.g << 8)) == (cb.r | (cb.g << 8))) ? ac_ : 0);\n"; break;
+                case 4: s += "    int ar = ad_ + (((ca.r | (ca.g << 8) | (ca.b << 16)) > (cb.r | (cb.g << 8) | (cb.b << 16))) ? ac_ : 0);\n"; break;
+                case 5: s += "    int ar = ad_ + (((ca.r | (ca.g << 8) | (ca.b << 16)) == (cb.r | (cb.g << 8) | (cb.b << 16))) ? ac_ : 0);\n"; break;
                 case 6: s += "    int ar = ad_ + ((aa_ > ab_) ? ac_ : 0);\n"; break;
-                case 7: s += "    int ar = ad_ + ((aa_ == ab_) ? ac_ : 0);\n"; break;
-                default: s += "    int ar = ad_ + ((aa_ > ab_) ? ac_ : 0);\n"; break;
+                default: s += "    int ar = ad_ + ((aa_ == ab_) ? ac_ : 0);\n"; break;
                 }
             }
             s += aclamp ? "    ar = clamp(ar, 0, 255);\n" : "    ar = clamp(ar, -1024, 1023);\n";
