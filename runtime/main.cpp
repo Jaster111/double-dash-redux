@@ -134,11 +134,11 @@ int main(int argc, char** argv) {
     alloc_memory();
     cpu_init();
     host_init();
+    void patches_init();   // host/patches.cpp (before hw_init: the renderer sizes the EFB for widescreen)
+    patches_init();
     hw_init();
     u32 entry = load_dol();
     setup_boot_info();
-    void patches_init();   // host/patches.cpp
-    patches_init();
     void dbg_init();
     dbg_init();
     void prof_init();

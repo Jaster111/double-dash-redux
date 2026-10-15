@@ -2,7 +2,7 @@
 //
 // Vertices are transformed on the CPU (vertex.cpp); TEV is emulated by
 // generated pixel shaders (shader.cpp).  The EFB is a render target at
-// EFB_SCALE x the native 640x528.  EFB copies stay on the GPU: texture copies
+// EFB_SX x EFB_SY times the native 640x528 (wider in 16:9).  EFB copies stay on the GPU: texture copies
 // are kept in a cache keyed by their destination address and substituted when
 // the game samples that address; display (XFB) copies are presented at the
 // next VI retrace.
@@ -26,7 +26,9 @@ u32 vi_xfb_address();
 double vi_field_ms();
 
 static const int EFB_W = 640, EFB_H = 528;
-static int EFB_SCALE = 3;
+// internal resolution: video.internal_scale vertically; in 16:9 the 3D is shown 4/3 wider than it is drawn,
+// so the EFB gets that many more columns (ceil(scale * 4/3)) and the presenter does not upscale it
+static int EFB_SX = 3, EFB_SY = 3;
 
 static ID3D11Device* s_dev;
 static ID3D11DeviceContext* s_ctx;
@@ -212,7 +214,9 @@ static void shader_cache_load();
 
 void gx_render_init() {
     HWND wnd = host_window();
-    EFB_SCALE = std::clamp(cfg_int("video.internal_scale", 3, "DD_EFB_SCALE"), 1, 8);
+    EFB_SY = std::clamp(cfg_int("video.internal_scale", 3, "DD_EFB_SCALE"), 1, 8);
+    extern bool g_widescreen;   // host/patches.cpp (decided before the renderer starts)
+    EFB_SX = g_widescreen ? (EFB_SY * 4 + 2) / 3 : EFB_SY;
     DXGI_SWAP_CHAIN_DESC sd = {};
     sd.BufferCount = 2;
     sd.BufferDesc.Format = DXGI_FORMAT_R8G8B8A8_UNORM;
@@ -240,7 +244,7 @@ void gx_render_init() {
         }
     }
     create_backbuffer_view();
-    int w = EFB_W * EFB_SCALE, h = EFB_H * EFB_SCALE;
+    int w = EFB_W * EFB_SX, h = EFB_H * EFB_SY;
     create_rt(w, h, DXGI_FORMAT_R8G8B8A8_UNORM, &s_efb, &s_efb_rtv, &s_efb_srv);
     create_rt(w, h, DXGI_FORMAT_R8G8B8A8_UNORM, &s_efb_copy_src, nullptr, &s_efb_copy_src_srv);
     {
@@ -731,7 +735,7 @@ static D3D11_RECT scissor_rect() {
     x0 = std::max(0, x0); y0 = std::max(0, y0); x1 = std::min(EFB_W, x1); y1 = std::min(EFB_H, y1);
     if (x1 < x0) x1 = x0;
     if (y1 < y0) y1 = y0;
-    return D3D11_RECT{x0 * EFB_SCALE, y0 * EFB_SCALE, x1 * EFB_SCALE, y1 * EFB_SCALE};
+    return D3D11_RECT{x0 * EFB_SX, y0 * EFB_SY, x1 * EFB_SX, y1 * EFB_SY};
 }
 
 static std::vector<u8> s_lp_verts;   // scratch for lines / points (expanded into quads)
@@ -806,7 +810,7 @@ static void bind_state(const GxDrawState& st) {
         s_ctx->IASetPrimitiveTopology(D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
         s_ctx->PSSetConstantBuffers(0, 1, &s_ps_cb);
         s_ctx->OMSetRenderTargets(1, &s_efb_rtv, s_dsv);
-        D3D11_VIEWPORT vp = {0, 0, (float)(EFB_W * EFB_SCALE), (float)(EFB_H * EFB_SCALE), 0.0f, 1.0f};
+        D3D11_VIEWPORT vp = {0, 0, (float)(EFB_W * EFB_SX), (float)(EFB_H * EFB_SY), 0.0f, 1.0f};
         s_ctx->RSSetViewports(1, &vp);
         s_bind_dirty = false;
     }
@@ -908,7 +912,7 @@ static void depth_probe(const char* what, u32 prim, u32 count) {
         s_dev->CreateTexture2D(&d, nullptr, &probe);
         if (!probe) return;
     }
-    u32 cx = EFB_W * EFB_SCALE / 2, cy = 224 * EFB_SCALE;
+    u32 cx = EFB_W * EFB_SX / 2, cy = 224 * EFB_SY;
     s_ctx->CopyResource(probe, s_depth);
     D3D11_MAPPED_SUBRESOURCE pm;
     if (FAILED(s_ctx->Map(probe, 0, D3D11_MAP_READ, 0, &pm))) return;
@@ -988,7 +992,7 @@ static bool compute_state(GxDrawState& st, bool tri, u32 cull) {
             float wd2 = 2.0f * xf_f(0x101A);
             if (wd2 == 0.0f) wd2 = (float)EFB_W;
             cb.fog0[2] = ((float)((s32)(bp[0xE8] & 0x3FF) - 342) / wd2) * 2.0f - 1.0f;
-            cb.fog0[3] = wd2 * EFB_SCALE;
+            cb.fog0[3] = wd2 * EFB_SX;
             for (int i = 0; i < 10; i++) {
                 u32 r = bp[0xE9 + i / 2] >> (12 * (i & 1));
                 cb.fogrange[i / 4][i % 4] = (float)(r & 0xFFF) / 256.0f * 4.0f;
@@ -1226,7 +1230,7 @@ static void release_copy(EfbCopy& c) {
 // strip, must not wipe the depth of the rest of the frame).
 static void clear_depth_rect(const D3D11_RECT& r, float z) {
     if (dbg_flags & 8) z = 1.0f;
-    if (r.left <= 0 && r.top <= 0 && r.right >= EFB_W * EFB_SCALE && r.bottom >= EFB_H * EFB_SCALE) {
+    if (r.left <= 0 && r.top <= 0 && r.right >= EFB_W * EFB_SX && r.bottom >= EFB_H * EFB_SY) {
         s_ctx->ClearDepthStencilView(s_dsv, D3D11_CLEAR_DEPTH, z, 0);
         return;
     }
@@ -1234,7 +1238,7 @@ static void clear_depth_rect(const D3D11_RECT& r, float z) {
     cbv.p0[0] = z;
     s_ctx->UpdateSubresource(s_copy_cb, 0, nullptr, &cbv, 0, 0);
     s_ctx->OMSetRenderTargets(0, nullptr, s_dsv);
-    D3D11_VIEWPORT vp = {0, 0, (float)(EFB_W * EFB_SCALE), (float)(EFB_H * EFB_SCALE), 0, 1};
+    D3D11_VIEWPORT vp = {0, 0, (float)(EFB_W * EFB_SX), (float)(EFB_H * EFB_SY), 0, 1};
     s_ctx->RSSetViewports(1, &vp);
     s_ctx->RSSetScissorRects(1, &r);
     s_ctx->RSSetState(get_rast(0));
@@ -1254,7 +1258,7 @@ static void efb_clear_rect(u32 x, u32 y, u32 w, u32 h) {
     u32 cm0 = g_gx.bp[0x41];
     bool color_upd = (cm0 >> 3) & 1, alpha_upd = (cm0 >> 4) & 1, z_upd = (g_gx.bp[0x40] >> 4) & 1;
     if (!efb_has_alpha()) col[3] = 1.0f;
-    D3D11_RECT r = {(LONG)(x * EFB_SCALE), (LONG)(y * EFB_SCALE), (LONG)((x + w) * EFB_SCALE), (LONG)((y + h) * EFB_SCALE)};
+    D3D11_RECT r = {(LONG)(x * EFB_SX), (LONG)(y * EFB_SY), (LONG)((x + w) * EFB_SX), (LONG)((y + h) * EFB_SY)};
     ID3D11DeviceContext1* c1 = nullptr;
     s_ctx->QueryInterface(__uuidof(ID3D11DeviceContext1), (void**)&c1);
     if (color_upd != alpha_upd && efb_has_alpha()) {
@@ -1266,7 +1270,7 @@ static void efb_clear_rect(u32 x, u32 y, u32 w, u32 h) {
         memcpy(cbv.p1, col, sizeof col);
         s_ctx->UpdateSubresource(s_copy_cb, 0, nullptr, &cbv, 0, 0);
         s_ctx->OMSetRenderTargets(1, &s_efb_rtv, nullptr);
-        D3D11_VIEWPORT vp = {0, 0, (float)(EFB_W * EFB_SCALE), (float)(EFB_H * EFB_SCALE), 0, 1};
+        D3D11_VIEWPORT vp = {0, 0, (float)(EFB_W * EFB_SX), (float)(EFB_H * EFB_SY), 0, 1};
         s_ctx->RSSetViewports(1, &vp);
         s_ctx->RSSetScissorRects(1, &r);
         s_ctx->RSSetState(get_rast(0));
@@ -1312,7 +1316,7 @@ static void efb_sample_log(const char* what) {
     const u32 pts[4][2] = {{304, 112}, {304, 224}, {304, 400}, {100, 300}};
     char buf[256]; int n = 0;
     for (auto& p : pts) {
-        const u8* px = (const u8*)m.pData + (size_t)(p[1] * EFB_SCALE) * m.RowPitch + (size_t)(p[0] * EFB_SCALE) * 4;
+        const u8* px = (const u8*)m.pData + (size_t)(p[1] * EFB_SY) * m.RowPitch + (size_t)(p[0] * EFB_SX) * 4;
         n += snprintf(buf + n, sizeof buf - n, " (%u,%u)=%02X%02X%02X/a%u", p[0], p[1], px[0], px[1], px[2], px[3]);
     }
     s_ctx->Unmap(st, 0);
@@ -1360,13 +1364,13 @@ static void efb_copy(u32 val) {
     // snapshot the EFB region source
     s_ctx->CopyResource(s_efb_copy_src, s_efb);
     ID3D11ShaderResourceView* src = depth_src ? s_depth_srv : s_efb_copy_src_srv;
-    float W = (float)(EFB_W * EFB_SCALE), H = (float)(EFB_H * EFB_SCALE);
+    float W = (float)(EFB_W * EFB_SX), H = (float)(EFB_H * EFB_SY);
     BlitCB cbv = {};
-    cbv.rect[0] = sx * EFB_SCALE / W; cbv.rect[1] = sy * EFB_SCALE / H;
-    cbv.rect[2] = sw * EFB_SCALE / W; cbv.rect[3] = sh * EFB_SCALE / H;
+    cbv.rect[0] = sx * EFB_SX / W; cbv.rect[1] = sy * EFB_SY / H;
+    cbv.rect[2] = sw * EFB_SX / W; cbv.rect[3] = sh * EFB_SY / H;
     if (to_xfb) {
         EfbCopy& c = s_xfb_copies[dst];
-        u32 ow = sw * EFB_SCALE, oh = sh * EFB_SCALE;
+        u32 ow = sw * EFB_SX, oh = sh * EFB_SY;
         if (!c.tex || c.w != sw || c.h != sh) {
             release_copy(c);
             ID3D11RenderTargetView* rtv = nullptr;
@@ -1375,7 +1379,7 @@ static void efb_copy(u32 val) {
             c.w = sw; c.h = sh;
         }
         // display copies need no conversion: copy the region straight from the EFB
-        D3D11_BOX box = {sx * EFB_SCALE, sy * EFB_SCALE, 0, (sx + sw) * EFB_SCALE, (sy + sh) * EFB_SCALE, 1};
+        D3D11_BOX box = {sx * EFB_SX, sy * EFB_SY, 0, (sx + sw) * EFB_SX, (sy + sh) * EFB_SY, 1};
         s_ctx->CopySubresourceRegion(c.tex, 0, 0, 0, 0, s_efb, 0, &box);
         s_frame++;
         c.frame = s_frame;
@@ -1401,7 +1405,7 @@ static void efb_copy(u32 val) {
             case 12: mode = 10; break;
             }
         EfbCopy& c = s_efb_copies[dst];
-        u32 ow = tw * EFB_SCALE, oh = th * EFB_SCALE;
+        u32 ow = tw * EFB_SX, oh = th * EFB_SY;
         if (!c.tex || c.w != tw || c.h != th) {
             release_copy(c);
             ID3D11RenderTargetView* rtv = nullptr;
@@ -1424,8 +1428,8 @@ static void efb_copy(u32 val) {
         cbv.p0[0] = (float)mode;
         cbv.p1[1] = depth_src ? 1.0f : 0.0f;
         cbv.p0[1] = half ? 1.0f : 0.0f;
-        cbv.p0[2] = 1.0f / W * EFB_SCALE;
-        cbv.p0[3] = 1.0f / H * EFB_SCALE;
+        cbv.p0[2] = 1.0f / W * EFB_SX;
+        cbv.p0[3] = 1.0f / H * EFB_SY;
         blit(src, rtv, ow, oh, cbv, s_copy_ps, half ? s_linear_clamp : s_point_clamp);
         rtv->Release();
     }
