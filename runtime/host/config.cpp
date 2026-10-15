@@ -26,6 +26,8 @@ static const char* const DEFAULT_SETTINGS =
     "internal_scale = 3\n"
     "; 1 = offer 60 Hz (PAL60) at boot, preselected; 0 = 50 Hz only (no prompt)\n"
     "pal60 = 1\n"
+    "; 1 = 16:9 widescreen (the \"16:9 Widescreen v2\" code by Ralf and Kester, with its menu backgrounds add-on)\n"
+    "widescreen = 0\n"
     "\n"
     "[audio]\n"
     "; master volume in percent (0-100)\n"

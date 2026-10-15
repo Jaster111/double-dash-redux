@@ -116,8 +116,9 @@ def ranges_from_starts(prog, starts):
     return out
 
 
-def reach(prog, start, end):
-    """Intra-range recursive descent from the entry.
+def reach(prog, start, end, extra=frozenset()):
+    """Intra-range recursive descent from the entry (`extra`: addresses outside the range that also
+    belong to the function, the code caves of a patch variant).
 
     A reached `bctr` makes every data-referenced code address inside the range
     a jump-table target (switch statements), so those are followed as well.
@@ -126,17 +127,19 @@ def reach(prog, start, end):
     work = [start]
     jt_added = False
     while True:
-        _reach_walk(prog, start, end, seen, work)
+        _reach_walk(prog, start, end, seen, work, extra)
         if jt_added or not any(prog.insn(a).op == "bcctr" and not prog.insn(a).lk for a in seen):
             return seen
         jt_added = True
         work = [t for t in prog.table_ptrs_in(start, end) if t not in seen]
 
 
-def _reach_walk(prog, start, end, seen, work):
+def _reach_walk(prog, start, end, seen, work, extra=frozenset()):
+    def inside(t):
+        return start <= t < end or t in extra
     while work:
         a = work.pop()
-        while start <= a < end and a not in seen:
+        while inside(a) and a not in seen:
             i = prog.insn(a)
             if i is None:
                 break
@@ -145,12 +148,12 @@ def _reach_walk(prog, start, end, seen, work):
                 if i.lk:
                     a += 4
                     continue
-                if start <= i.target < end:
+                if inside(i.target):
                     a = i.target
                     continue
                 break
             if i.op == "bc":
-                if not i.lk and start <= i.target < end:
+                if not i.lk and inside(i.target):
                     work.append(i.target)
                 if (i.bo & 0x14) == 0x14:  # branch always
                     break
@@ -219,6 +222,8 @@ class Emitter:
         self.hle = hle                      # addr -> hle symbol
         self.jump_targets = jump_targets    # sorted list of data-referenced code addresses
         self.warn = []
+        self.alias = {}                     # patch variants: callable code caves, addr -> function name
+        self._extra = frozenset()           # code caves of the function being generated
 
     # ---------------------------------------------------------------- helpers
     @staticmethod
@@ -242,10 +247,10 @@ class Emitter:
         return "SET_CR0(%s);" % expr
 
     def fname(self, a):
-        return "fn_%08X" % a
+        return self.alias.get(a) or "fn_%08X" % a
 
     def call(self, target, ret):
-        if target in self.fstart:
+        if target in self.fstart or target in self.alias:
             return "CALL(%s, %s);" % (self.fname(target), hx(ret))
         self.warn.append("call to non-function %08x" % target)
         return "c->lr = %s; call_indirect(c, %s);" % (hx(ret), hx(target))
@@ -274,13 +279,14 @@ class Emitter:
             return out + body
         return self.body(start, end, nm, self.fname(start))
 
-    def body(self, start, end, nm, cname):
+    def body(self, start, end, nm, cname, extra=frozenset()):
         out = []
-        seen = reach(self.prog, start, end)
+        self._extra = extra
+        seen = reach(self.prog, start, end, extra)
         labels = set()
         for a in seen:
             i = self.prog.insn(a)
-            if i.op in ("b", "bc") and not i.lk and start <= i.target < end:
+            if i.op in ("b", "bc") and not i.lk and self.inside(i.target, start, end):
                 labels.add(i.target)
         # jump-table targets referenced from data that fall inside this function
         jt = [t for t in self.jt_in(start, end) if t in seen]
@@ -311,8 +317,9 @@ class Emitter:
             out.append("  " + code)
             prev_terminal = self.terminal(i)
             a += 4
-        last = max(seen) if seen else start
+        last = max((x for x in seen if start <= x < end), default=start)
         li = self.prog.insn(last)
+        tail = []
         if not self.terminal(li):
             nxt = last + 4
             if li.op == "b" and li.lk and nxt not in self.fstart:
@@ -322,8 +329,18 @@ class Emitter:
                 out.append("  %s(c); return; // falls through" % self.fname(nxt))
             else:
                 out.append("  rt_fatal_fallthrough(c, %s);" % hx(nxt))
+        # code caves: entered and left only by branches
+        for a in sorted(x for x in seen if x in extra):
+            i = self.prog.insn(a)
+            if a in labels:
+                out.append("L_%08X:;" % a)
+            out.append("  " + self.insn(i, a, start, end, []) + "  // cave")
+        self._extra = frozenset()
         out.append("}")
         return out
+
+    def inside(self, t, start, end):
+        return start <= t < end or t in self._extra
 
     def jt_in(self, s, e):
         import bisect
@@ -354,9 +371,9 @@ class Emitter:
                 if i.target == nxt:
                     return "c->lr = %s; // bl next (get pc)" % hx(nxt)
                 return self.call(i.target, nxt)
-            if start <= i.target < end:
+            if self.inside(i.target, start, end):
                 return self.goto(i.target, a, start)
-            if i.target in self.fstart:
+            if i.target in self.fstart or i.target in self.alias:
                 return "%s(c); return; // tail call" % self.fname(i.target)
             self.warn.append("branch to unknown %08x from %08x" % (i.target, a))
             return "call_indirect(c, %s); return;" % hx(i.target)
@@ -364,9 +381,9 @@ class Emitter:
             pre, cond = self.cond(i)
             if i.lk:
                 body = self.call(i.target, nxt) if i.target != nxt else "c->lr = %s;" % hx(nxt)
-            elif start <= i.target < end:
+            elif self.inside(i.target, start, end):
                 body = self.goto(i.target, a, start)
-            elif i.target in self.fstart:
+            elif i.target in self.fstart or i.target in self.alias:
                 body = "{ %s(c); return; }" % self.fname(i.target)
             else:
                 self.warn.append("cond branch to unknown %08x from %08x" % (i.target, a))
@@ -846,6 +863,157 @@ class Emitter:
     def op_twi(self, i, a): return "rt_trap(c, %s);" % hx(a) if i.rd == 31 else ";"
 
 
+# =========================================================================== patch variants
+# runtime/patches/NAME.gecko holds Gecko codes (Dolphin GameSettings format).  Their unconditional writes into
+# code (04 / 06) are compiled in: every function they change gets a variant generated from the patched code,
+# fn_X dispatches on g_patch_on[n] (set by the runtime, host/patches.cpp) between fn_X__base and fn_X__NAME.
+# Code caves are the written code entered by a written branch: one entered by `bl` becomes a function of its
+# own, one entered by `b` (a detour that branches back) is compiled into the variants that branch to it.
+# All the other codes (data writes, pointer codes, conditionals) are left to the runtime's Gecko interpreter,
+# which runs them every VI field: build/recomp/patches.cpp.
+PATCH_DIR = "runtime/patches"
+
+
+def parse_gecko(path):
+    codes = []
+    for line in open(path):
+        line = line.split(";")[0].strip()
+        if not line or line.startswith("$") or line.startswith("*"):
+            continue
+        a, b = line.split()[:2]
+        codes.append((int(a, 16), int(b, 16)))
+    return codes
+
+
+def split_gecko(prog, codes):
+    """-> (code writes addr -> u32, the remaining codes for the runtime)."""
+    writes, rest = {}, []
+    depth = 0   # conditional nesting: only top-level writes can be compiled in
+    i = 0
+    while i < len(codes):
+        a, v = codes[i]
+        t = (a >> 24) & 0xFE
+        n = 1
+        if t == 0x06:
+            n = 1 + (v + 7) // 8
+        addr = 0x80000000 | (a & 0x01FFFFFF)
+        if depth == 0 and t in (0x04, 0x06) and prog.in_text(addr):
+            if t == 0x04:
+                writes[addr] = v
+            else:
+                assert v % 4 == 0 and addr % 4 == 0, "06 code into code must be whole words"
+                data = b"".join(struct.pack(">II", *codes[i + 1 + k]) for k in range(n - 1))[:v]
+                for k in range(0, v, 4):
+                    writes[addr + k] = struct.unpack_from(">I", data, k)[0]
+        else:
+            rest.extend(codes[i:i + n])
+            if 0x20 <= t <= 0x2E or t == 0xDE:
+                depth += 1
+            elif t == 0xE2:
+                depth = max(0, depth - (a & 0xFF))   # E2T000VV: VV endifs
+            elif t == 0xE0:
+                depth = 0
+        i += n
+    return writes, rest
+
+
+def patched_program(prog, writes):
+    data = bytearray(prog.dol.data)
+    for a, w in writes.items():
+        s = prog.dol.section_for(a)
+        struct.pack_into(">I", data, s.offset + a - s.addr, w)
+    p = Program(gcdol.Dol(bytes(data), prog.dol.sections, prog.dol.bss_addr, prog.dol.bss_size, prog.dol.entry))
+    p.ptr_list, p.ptr_locs = prog.ptr_list, prog.ptr_locs
+    return p
+
+
+class PatchSet:
+    def __init__(self, index, name, prog, funcs, codes):
+        self.index, self.name = index, name
+        self.writes, self.runtime_codes = split_gecko(prog, codes)
+        self.prog = patched_program(prog, self.writes)
+        written = frozenset(self.writes)
+        # branch targets inside the written code; a target inside another target's cave is internal
+        targets = {}
+        for a in self.writes:
+            i = self.prog.insn(a)
+            if i is not None and i.op in ("b", "bc") and i.target in written:
+                targets.setdefault(i.target, set()).add((a, bool(i.lk)))
+        walks = {}
+        for t in targets:
+            seen = set()
+            _reach_walk(self.prog, 0, 0, seen, [t], written)
+            walks[t] = seen
+        self.callable, self.detour = {}, set()   # entry -> (lo, hi); detour cave addresses
+        cave_addrs = set()
+        for t, srcs in targets.items():
+            if any(t in walks[o] and o != t and not (o in walks[t]) for o in walks):
+                continue   # internal branch of a cave
+            body = walks[t]
+            cave_addrs |= body
+            from_outside = {lk for a, lk in srcs if a not in body}
+            assert len(from_outside) == 1, "cave %08x entered both by b and bl" % t
+            if True in from_outside:
+                lo, hi = min(body), max(body) + 4
+                assert body == set(range(lo, hi, 4)), "callable cave %08x is not contiguous" % t
+                self.callable[t] = (lo, hi)
+            else:
+                self.detour |= body
+        import bisect
+        starts = [s for s, _ in funcs]
+        self.funcs = sorted({funcs[bisect.bisect_right(starts, a) - 1] for a in self.writes if a not in cave_addrs})
+
+    def suffix(self, s):
+        return "fn_%08X__%s" % (s, self.name)
+
+
+def load_patches(prog, funcs):
+    out = []
+    if not os.path.isdir(PATCH_DIR):
+        return out
+    for fn in sorted(os.listdir(PATCH_DIR)):
+        if fn.endswith(".gecko"):
+            out.append(PatchSet(len(out), fn[:-6], prog, funcs, parse_gecko(os.path.join(PATCH_DIR, fn))))
+    return out
+
+
+def write_patches(patches, funcs, names, hle, jump_targets, base_em):
+    """patch_variants.cpp (variants, caves, dispatchers) and patches.cpp (runtime codes)."""
+    lines = ["// generated by tools/recomp/recomp.py from %s/*.gecko" % PATCH_DIR, "#include \"funcs.h\"", ""]
+    warn = []
+    for p in patches:
+        em = Emitter(p.prog, funcs, names, {}, jump_targets)
+        em.alias = {t: p.suffix(t) for t in p.callable}
+        for t, (lo, hi) in sorted(p.callable.items()):
+            lines += em.body(lo, hi, "code cave (%s)" % p.name, p.suffix(t)) + [""]
+        for s, e in p.funcs:
+            assert s not in hle, "patched function %08x is HLE" % s
+            lines += em.body(s, e, names.get(s), p.suffix(s), frozenset(p.detour)) + [""]
+            lines += base_em.body(s, e, names.get(s), "fn_%08X__base" % s) + [""]
+            lines.append("void fn_%08X(CPU* c) { if (g_patch_on[%d]) %s(c); else fn_%08X__base(c); }"
+                         % (s, p.index, p.suffix(s), s))
+            lines.append("")
+        warn += em.warn
+    open(os.path.join(OUT, "patch_variants.cpp"), "w").write("\n".join(lines) + "\n")
+    with open(os.path.join(OUT, "patches.cpp"), "w") as f:
+        f.write("// generated by tools/recomp/recomp.py: the Gecko codes of %s/*.gecko that the runtime runs\n"
+                "// (host/patches.cpp); their writes into code are compiled in (patch_variants.cpp)\n" % PATCH_DIR)
+        f.write("unsigned char g_patch_on[%d];\n" % max(1, len(patches)))
+        for p in patches:
+            f.write("static const unsigned k_%s[] = {\n" % p.name)
+            for a, v in p.runtime_codes:
+                f.write("  0x%08X, 0x%08X,\n" % (a, v))
+            f.write("  0};\n")
+        f.write("extern const unsigned g_patch_count = %d;\n" % len(patches))
+        f.write("extern const char* const g_patch_names[] = {%s};\n"
+                % ", ".join(["\"%s\"" % p.name for p in patches] or ["0"]))
+        f.write("extern const unsigned* const g_patch_codes[] = {%s};\n"
+                % ", ".join(["k_" + p.name for p in patches] or ["0"]))
+        f.write("extern const unsigned g_patch_code_words[] = {%s};\n"
+                % ", ".join([str(2 * len(p.runtime_codes)) for p in patches] or ["0"]))
+    return warn
+
+
 # =========================================================================== driver
 
 def load_hle(path, names_rev):
@@ -921,6 +1089,8 @@ def main():
     hle = load_hle("runtime/hle_functions.txt", names_rev)
 
     em = Emitter(prog, funcs, names, hle, jump_targets)
+    patches = load_patches(prog, funcs)
+    patched = {s for p in patches for s, _ in p.funcs}
     os.makedirs(OUT, exist_ok=True)
     for f in os.listdir(OUT):
         if f.startswith("funcs_") and f.endswith(".cpp"):
@@ -933,11 +1103,19 @@ def main():
             h.write("void %s(CPU* c);\n" % sym)
         for a in sorted(hle):
             h.write("void orig_%08X(CPU* c);\n" % a)
+        h.write("extern unsigned char g_patch_on[];   // patches.cpp; host/patches.cpp sets it\n")
+        for p in patches:
+            for t in sorted(p.callable):
+                h.write("void %s(CPU* c);\n" % p.suffix(t))
+            for s, _ in p.funcs:
+                h.write("void %s(CPU* c);\nvoid fn_%08X__base(CPU* c);\n" % (p.suffix(s), s))
     nfile = 0
     for k in range(0, len(funcs), FUNCS_PER_FILE):
         with open(os.path.join(OUT, "funcs_%03d.cpp" % nfile), "w") as f:
             f.write("// generated by tools/recomp/recomp.py\n#include \"funcs.h\"\n\n")
             for s, e in funcs[k:k + FUNCS_PER_FILE]:
+                if s in patched:
+                    continue   # patch_variants.cpp
                 f.write("\n".join(em.function(s, e)))
                 f.write("\n\n")
         nfile += 1
@@ -949,6 +1127,12 @@ def main():
         f.write("};\nconst unsigned g_func_count = %d;\n" % len(funcs))
     json.dump([{"start": s, "end": e, "name": names.get(s)} for s, e in funcs],
               open(os.path.join(OUT, "functions.json"), "w"))
+    em.warn += write_patches(patches, funcs, names, hle, jump_targets, em)
+    for p in patches:
+        print("patch %s: %d code words compiled in, functions %s, callable caves %s, %d detour cave words, "
+              "%d runtime codes" % (p.name, len(p.writes), " ".join("%08X" % s for s, _ in p.funcs),
+                                    " ".join("%08X" % t for t in sorted(p.callable)), len(p.detour),
+                                    len(p.runtime_codes)))
     with open(os.path.join(OUT, "warnings.txt"), "w") as f:
         f.write("\n".join(em.warn))
     print("functions: %d  files: %d  jump-table targets: %d  hle: %d  warnings: %d"

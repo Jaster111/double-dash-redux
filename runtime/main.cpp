@@ -137,6 +137,8 @@ int main(int argc, char** argv) {
     hw_init();
     u32 entry = load_dol();
     setup_boot_info();
+    void patches_init();   // host/patches.cpp
+    patches_init();
     void dbg_init();
     dbg_init();
     void prof_init();

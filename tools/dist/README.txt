@@ -48,8 +48,14 @@ Window:
 Settings
 --------
 settings.ini is created with defaults and comments on the first start: window size, fullscreen,
-internal resolution, 50/60 Hz, volume, rumble, the memory card images and the disc image. Changes take
-effect the next time the game starts.
+internal resolution, 50/60 Hz, widescreen, volume, rumble, the memory card images and the disc image.
+Changes take effect the next time the game starts.
+
+Widescreen: set "widescreen = 1" in the [video] section for 16:9. It uses the "16:9 Widescreen v2"
+code by Ralf and Kester (with Ralf's menu backgrounds add-on) from Dolphin's game settings: the races
+show a wider view with the HUD at the screen edges, menus keep their proportions, and the opening movie
+stays 4:3. Some menus show bits of off-screen graphics at the left and right edges, as they do in
+Dolphin with the same code.
 
 Saves
 -----

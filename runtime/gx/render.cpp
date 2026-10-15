@@ -606,6 +606,7 @@ struct EfbCopy {
     u32 bytes = 0;
     u32 validated_frame = ~0u;   // mem_hash last checked in this game frame
     u32 frame = 0;               // XFB copies: game frame number
+    bool movie = false;          // XFB copies: a THP movie frame (4:3 even in widescreen)
     bool stale = false;          // the CPU overwrote the copy's RAM: use the texture data instead
 };
 static std::unordered_map<u64, TexEntry> s_tex_cache;
@@ -1378,6 +1379,9 @@ static void efb_copy(u32 val) {
         s_ctx->CopySubresourceRegion(c.tex, 0, 0, 0, 0, s_efb, 0, &box);
         s_frame++;
         c.frame = s_frame;
+        extern bool g_movie_drawn;   // host/patches.cpp
+        c.movie = g_movie_drawn;
+        g_movie_drawn = false;
         // DD_DBG_SLOW=ms: busy-wait this long per game frame (simulates a slower host when testing timing behaviour)
         static const double slow_ms = getenv("DD_DBG_SLOW") ? atof(getenv("DD_DBG_SLOW")) : 0.0;
         if (slow_ms > 0) for (double t0 = qpc_ms(); qpc_ms() - t0 < slow_ms;) YieldProcessor();
@@ -1621,9 +1625,16 @@ bool render_present_efb() {
     }
     float black[4] = {0, 0, 0, 1};
     s_ctx->ClearRenderTargetView(s_backbuffer_rtv, black);
-    // 4:3 letterbox
-    int vw = ww, vh = ww * 3 / 4;
-    if (vh > wh) { vh = wh; vw = wh * 4 / 3; }
+    // 4:3 letterbox, or 16:9 with the widescreen patch (host/patches.cpp: the game renders anamorphically),
+    // except for the THP movie frames, which stay 4:3
+    extern bool g_widescreen;
+    bool wide = g_widescreen && !it->second.movie;
+    static bool was_wide = true;
+    if (g_widescreen && wide != was_wide) LOG("gx", "widescreen: presenting %s (field %u)", wide ? "16:9" : "4:3 (movie)", s_fields);
+    was_wide = wide;
+    int ax = wide ? 16 : 4, ay = wide ? 9 : 3;
+    int vw = ww, vh = ww * ay / ax;
+    if (vh > wh) { vh = wh; vw = wh * ax / ay; }
     BlitCB cbv = {};
     cbv.rect[0] = 0; cbv.rect[1] = 0; cbv.rect[2] = 1; cbv.rect[3] = 1;
     ID3D11ShaderResourceView* none[8] = {};

@@ -12,6 +12,7 @@ static void start_timing();
 void host_present_field(u32 xfb_addr, u32 stride_bytes, u32 height);   // host/video.cpp
 void gx_vi_retrace();                                                  // gx: end-of-field hooks
 void dbg_on_field();                                                   // host/debug.cpp
+void patches_on_field();                                               // host/patches.cpp
 
 static bool is_pal() { return ((s_regs[0x02 / 2] >> 8) & 3) == 1; }
 
@@ -70,6 +71,7 @@ static void field_event(u64) {
     update_irq();
     si_vblank();
     gx_vi_retrace();
+    patches_on_field();
     dbg_on_field();
     u32 tfbl = reg32(0x1C);
     u32 addr = (tfbl & 0x00FFFFFF) << ((tfbl & 0x10000000) ? 5 : 0);
