@@ -3,7 +3,7 @@ Double Dash Redux - Mario Kart: Double Dash!! as a native Windows game
 
 Double Dash Redux is a static recompilation of the European release of Mario Kart: Double Dash!!
 (GM4P01) to native Windows code. It contains no game data: you need your own disc image of the game.
-Source code and updates: https://github.com/OWNER/double-dash-redux
+Source code and updates: https://github.com/Jaster111/double-dash-redux
 
 Requirements
 ------------
@@ -84,6 +84,6 @@ when reporting a problem.
 Licence
 -------
 Double Dash Redux is free software under the GNU General Public License, version 2 or (at your option) any
-later version: see LICENSE.txt. The source code is at https://github.com/OWNER/double-dash-redux.
+later version: see LICENSE.txt. The source code is at https://github.com/Jaster111/double-dash-redux.
 It includes the Zstandard decompressor (BSD licence, LICENSE-zstd.txt).
 Mario Kart: Double Dash!! is (c) 2003 Nintendo. This project is not affiliated with or endorsed by Nintendo.

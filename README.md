@@ -8,7 +8,7 @@
 </p>
 
 <p align="center">
-  <a href="https://github.com/OWNER/double-dash-redux/releases/latest"><img alt="Download" src="https://img.shields.io/github/v/release/OWNER/double-dash-redux?label=download&style=for-the-badge&color=e61e28"></a>
+  <a href="https://github.com/Jaster111/double-dash-redux/releases/latest"><img alt="Download" src="https://img.shields.io/github/v/release/Jaster111/double-dash-redux?label=download&style=for-the-badge&color=e61e28"></a>
   <img alt="Platform: Windows" src="https://img.shields.io/badge/platform-Windows%2010%20%7C%2011-0078d4?style=for-the-badge&logo=windows">
   <img alt="Graphics: Direct3D 11" src="https://img.shields.io/badge/graphics-Direct3D%2011-555?style=for-the-badge">
   <a href="LICENSE"><img alt="Licence: GPL-2.0-or-later" src="https://img.shields.io/badge/licence-GPL--2.0--or--later-ffd200?style=for-the-badge"></a>
@@ -64,7 +64,7 @@
 
 ## 🚀 Quick start
 
-1. **Download** the latest `DoubleDashRedux-*.zip` from [Releases](https://github.com/OWNER/double-dash-redux/releases/latest).
+1. **Download** the latest `DoubleDashRedux-*.zip` from [Releases](https://github.com/Jaster111/double-dash-redux/releases/latest).
 2. **Extract** it to a folder you can write to (not *Program Files*). Settings, saves and the shader cache are kept next to the exe.
 3. **Add your disc image**: put the `.iso`, `.gcm` or `.rvz` in the same folder, or pick it in the launcher (*SYSTEM → Game disc*).
 4. **Run `DoubleDashRedux.exe`**, choose your settings and press **PLAY**.
@@ -132,7 +132,7 @@ PlayStation, Switch and other controllers work through Steam Input or a tool suc
 **You need:** Visual Studio 2022 or newer with *Desktop development with C++*, CMake 3.20+, Python 3.8+ and your `GM4P01` disc image.
 
 ```powershell
-git clone https://github.com/OWNER/double-dash-redux.git
+git clone https://github.com/Jaster111/double-dash-redux.git
 cd double-dash-redux
 powershell -ExecutionPolicy Bypass -File tools\build.ps1 -Disc "D:\Games\Mario Kart Double Dash (Europe).rvz"
 ```
@@ -190,7 +190,7 @@ Known issues:
 - LAN play (Broadband Adapter) is not supported.
 - Only the European release is supported.
 
-Found something else? Please [open an issue](https://github.com/OWNER/double-dash-redux/issues) and attach
+Found something else? Please [open an issue](https://github.com/Jaster111/double-dash-redux/issues) and attach
 `DoubleDashRedux.log` from the game folder.
 
 ## ❓ FAQ
