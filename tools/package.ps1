@@ -17,6 +17,7 @@ New-Item -ItemType Directory -Force $dir | Out-Null
 Copy-Item out\Release\doubledash.exe $dir
 if ($Pdb) { Copy-Item out\Release\doubledash.pdb $dir }
 Copy-Item tools\dist\README.txt $dir
+Copy-Item third_party\zstd\LICENSE (Join-Path $dir "LICENSE-zstd.txt")   # BSD: the notice ships with the binary
 $rev = (git rev-parse --short HEAD).Trim()
 if (git status --porcelain --untracked-files=no) { $rev += "-dirty" }
 $zip = "dist\DoubleDash-$rev.zip"

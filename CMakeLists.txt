@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.20)
-project(doubledash CXX)
+project(doubledash C CXX)
 
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -20,8 +20,16 @@ if(DD_SPCHECK)
   target_compile_definitions(recomp PRIVATE DD_SPCHECK)
 endif()
 
+# zstd decompressor (BSD, third_party/zstd): reads RVZ disc images
+file(GLOB ZSTD_SOURCES ${CMAKE_SOURCE_DIR}/third_party/zstd/lib/common/*.c ${CMAKE_SOURCE_DIR}/third_party/zstd/lib/decompress/*.c)
+add_library(zstd_dec STATIC ${ZSTD_SOURCES})
+target_compile_definitions(zstd_dec PRIVATE ZSTD_DISABLE_ASM)
+if(MSVC)
+  target_compile_options(zstd_dec PRIVATE /O2 /W0)
+endif()
+
 add_executable(doubledash ${RUNTIME_SOURCES})
-target_link_libraries(doubledash PRIVATE recomp d3d11 dxgi d3dcompiler xinput winmm ole32 windowscodecs comdlg32)
+target_link_libraries(doubledash PRIVATE recomp zstd_dec d3d11 dxgi d3dcompiler xinput winmm ole32 windowscodecs comdlg32)
 target_include_directories(doubledash PRIVATE ${CMAKE_SOURCE_DIR}/runtime ${CMAKE_SOURCE_DIR}/build/recomp)
 if(MSVC)
   target_compile_options(doubledash PRIVATE /MP /W3 /wd4244 /wd4267 /wd4996 /wd4146)

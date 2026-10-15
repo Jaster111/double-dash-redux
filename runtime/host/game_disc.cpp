@@ -3,12 +3,13 @@
 // boots from the image alone (the DOL is read from it, main.cpp).
 //
 // Search order: --iso PATH, settings.ini game.disc (DD_ISO), orig/game.iso (development tree), then *.iso /
-// *.gcm next to the executable.  When none of them is the right game a file dialog asks for the image, and
+// *.gcm / *.rvz next to the executable.  When none of them is the right game a file dialog asks for the image, and
 // the choice is saved as game.disc.  Paths are UTF-8.  DD_DISC_NOUI=1 (headless tests): no message boxes or
 // dialog, the process exits with code 2 when no image fits.
 #include "../common.h"
 #include <windows.h>
 #include <commdlg.h>
+#include "disc_image.h"
 #include <string>
 #include <vector>
 
@@ -46,25 +47,13 @@ static u32 crc32(const u8* p, size_t n) {
 
 static u32 be32(const u8* p) { return ((u32)p[0] << 24) | ((u32)p[1] << 16) | ((u32)p[2] << 8) | p[3]; }
 
-static bool read_at(HANDLE f, u64 off, void* dst, u32 len) {
-    OVERLAPPED ov{};
-    ov.Offset = (DWORD)off;
-    ov.OffsetHigh = (DWORD)(off >> 32);
-    DWORD got = 0;
-    return ReadFile(f, dst, len, &got, &ov) && got == len;
-}
-
 // empty if the image at `path` is the game this build runs, otherwise why not (for the user)
 static std::string check_image(const std::string& path) {
-    HANDLE f = CreateFileW(widen(path).c_str(), GENERIC_READ, FILE_SHARE_READ, nullptr, OPEN_EXISTING, 0, nullptr);
-    if (f == INVALID_HANDLE_VALUE) return "The file could not be opened.";
     std::string why;
+    DiscImage* img = disc_image_open(path, &why);
+    if (!img) return why;
     u8 h[0x440];
-    if (!read_at(f, 0, h, sizeof h)) why = "The file is too small to be a GameCube disc image.";
-    else if (!memcmp(h, "RVZ\x01", 4) || !memcmp(h, "WIA\x01", 4) || !memcmp(h, "CISO", 4) ||
-             be32(h) == 0x01C00BB1 /* GCZ */)
-        why = "This is a compressed disc image (RVZ / WIA / GCZ / CISO). Convert it to a plain ISO in Dolphin: "
-              "right-click the game, Convert File..., Format: ISO.";
+    if (img->size < sizeof h || !img->read(0, h, sizeof h)) why = "The file is too small to be a GameCube disc image.";
     else if (be32(h + 0x1C) != 0xC2339F3D) why = "This is not a GameCube disc image.";
     else if (memcmp(h, GAME_ID, 6)) {
         char name[0x41] = {};
@@ -79,23 +68,23 @@ static std::string check_image(const std::string& path) {
     } else {
         u32 off = be32(h + 0x420), end = 0;
         u8 dh[0x100];
-        if (read_at(f, off, dh, sizeof dh))
+        if (img->read(off, dh, sizeof dh))
             for (int i = 0; i < 18; i++) {
                 u32 o = be32(dh + 4 * i), s = be32(dh + 0x90 + 4 * i);
                 if (s && o + s > end) end = o + s;
             }
         std::vector<u8> dol(end);
-        if (end != DOL_SIZE || !read_at(f, off, dol.data(), end) || crc32(dol.data(), end) != DOL_CRC32)
+        if (end != DOL_SIZE || !img->read(off, dol.data(), end) || crc32(dol.data(), end) != DOL_CRC32)
             why = "The game code (main.dol) in this image is not the one this port was built from (a different "
                   "revision, or a modified image).";
     }
-    CloseHandle(f);
+    delete img;
     return why;
 }
 
 static std::vector<std::string> images_in_dir() {
     std::vector<std::string> out;
-    for (const wchar_t* pat : {L"*.iso", L"*.gcm"}) {
+    for (const wchar_t* pat : {L"*.iso", L"*.gcm", L"*.rvz"}) {
         WIN32_FIND_DATAW fd;
         HANDLE h = FindFirstFileW(pat, &fd);
         if (h == INVALID_HANDLE_VALUE) continue;
@@ -149,8 +138,8 @@ void disc_select(int argc, char** argv) {
         refused += c.first + "\n" + why + "\n\n";
     }
     if (chosen.empty())
-        message(refused + "Please select your disc image of Mario Kart: Double Dash!! (Europe, GM4P01) as a plain "
-                "ISO (.iso or .gcm), for example one dumped from your own disc with Dolphin.",
+        message(refused + "Please select your disc image of Mario Kart: Double Dash!! (Europe, GM4P01) as an "
+                "ISO (.iso / .gcm) or Dolphin RVZ (.rvz), for example one dumped from your own disc with Dolphin.",
                 refused.empty() ? MB_ICONINFORMATION : MB_ICONWARNING);
     while (chosen.empty()) {
         std::string p = ask_for_image();

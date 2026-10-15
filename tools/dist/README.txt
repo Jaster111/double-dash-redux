@@ -7,10 +7,11 @@ Windows code. It contains no game data: you need your own disc image of the game
 Requirements
 ------------
 - Windows 10 or 11, 64-bit, and a graphics card with Direct3D 11
-- A disc image of Mario Kart: Double Dash!! (Europe, game ID GM4P01) as a plain .iso or .gcm file,
-  for example one dumped from your own disc with Dolphin.
-  Compressed images (.rvz, .wia, .gcz, .ciso) have to be converted first: in Dolphin, right-click the
-  game, choose "Convert File...", set Format to ISO and click Convert.
+- A disc image of Mario Kart: Double Dash!! (Europe, game ID GM4P01) as an .iso / .gcm file or a
+  Dolphin .rvz file (Zstandard compression, Dolphin's default), for example one dumped from your own
+  disc with Dolphin.
+  Other compressed images (.wia, .gcz, .ciso) have to be converted first: in Dolphin, right-click the
+  game, choose "Convert File...", set Format to RVZ or ISO and click Convert.
   The North American (GM4E01) and Japanese (GM4J01) releases are not supported.
 
 Getting started
@@ -48,7 +49,7 @@ Window:
 Settings
 --------
 settings.ini is created with defaults and comments on the first start: window size, fullscreen,
-internal resolution, 50/60 Hz, widescreen, volume, rumble, the memory card images and the disc image.
+internal resolution, 50/60 Hz, widescreen, distance blur, volume, rumble, the memory card images and the disc image.
 Changes take effect the next time the game starts.
 
 Widescreen: set "widescreen = 1" in the [video] section for 16:9. It uses the "16:9 Widescreen v2"
@@ -56,6 +57,9 @@ code by Ralf and Kester (with Ralf's menu backgrounds add-on) from Dolphin's gam
 show a wider view with the HUD at the screen edges, menus keep their proportions, and the opening movie
 stays 4:3. Some menus show bits of off-screen graphics at the left and right edges, as they do in
 Dolphin with the same code.
+
+Distance blur: the courses blur faraway scenery (and some add a heat shimmer), as on the console.
+Set "depth_blur = 0" in the [video] section to keep everything sharp.
 
 Saves
 -----

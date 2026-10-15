@@ -1,6 +1,6 @@
-// DI: DVD interface, backed by an ISO image of the disc.
+// DI: DVD interface, backed by an image of the disc (ISO or RVZ, host/disc_image.cpp).
 #include "hw.h"
-#include <windows.h>
+#include "../host/disc_image.h"
 
 enum : u32 {
     DISR = 0x00, DICVR = 0x04, DICMDBUF0 = 0x08, DICMDBUF1 = 0x0C, DICMDBUF2 = 0x10, DIMAR = 0x14,
@@ -13,7 +13,7 @@ enum : u32 {
 };
 
 static u32 s_reg[0x10];
-static HANDLE s_iso = INVALID_HANDLE_VALUE;
+static DiscImage* s_iso;
 static u64 s_iso_size;
 static u32 s_error;
 
@@ -21,24 +21,14 @@ const char* g_iso_path = "orig/game.iso";   // UTF-8, chosen by host/game_disc.c
 void dbg_on_disc_read(u64 off, u32 mar, u32 n);   // host/debug.cpp
 
 bool disc_read(u64 off, void* dst, u32 len) {
-    if (s_iso == INVALID_HANDLE_VALUE) return false;
-    OVERLAPPED ov{};
-    ov.Offset = (DWORD)off;
-    ov.OffsetHigh = (DWORD)(off >> 32);
-    DWORD got = 0;
-    if (!ReadFile(s_iso, dst, len, &got, &ov)) return false;
-    if (got < len) memset((u8*)dst + got, 0, len - got);
-    return true;
+    return s_iso && s_iso->read(off, dst, len);
 }
 
 void di_init() {
-    wchar_t wpath[MAX_PATH * 4];
-    MultiByteToWideChar(CP_UTF8, 0, g_iso_path, -1, wpath, MAX_PATH * 4);
-    s_iso = CreateFileW(wpath, GENERIC_READ, FILE_SHARE_READ, nullptr, OPEN_EXISTING, FILE_FLAG_RANDOM_ACCESS, nullptr);
-    if (s_iso == INVALID_HANDLE_VALUE) rt_panic("cannot open disc image %s", g_iso_path);
-    LARGE_INTEGER sz;
-    GetFileSizeEx(s_iso, &sz);
-    s_iso_size = (u64)sz.QuadPart;
+    std::string why;
+    s_iso = disc_image_open(g_iso_path, &why);
+    if (!s_iso) rt_panic("cannot open disc image %s: %s", g_iso_path, why.c_str());
+    s_iso_size = s_iso->size;
     s_reg[DICFG / 4] = 0;
 }
 
