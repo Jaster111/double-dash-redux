@@ -1,8 +1,9 @@
-Mario Kart: Double Dash!! - native Windows port
-================================================
+Double Dash Redux - Mario Kart: Double Dash!! as a native Windows game
+=======================================================================
 
-This is a static recompilation of the European release of Mario Kart: Double Dash!! (GM4P01) to native
-Windows code. It contains no game data: you need your own disc image of the game.
+Double Dash Redux is a static recompilation of the European release of Mario Kart: Double Dash!!
+(GM4P01) to native Windows code. It contains no game data: you need your own disc image of the game.
+Source code and updates: https://github.com/OWNER/double-dash-redux
 
 Requirements
 ------------
@@ -17,10 +18,10 @@ Requirements
 Getting started
 ---------------
 1. Extract this folder anywhere you can write to (not into Program Files): settings, saves and the
-   shader cache are kept next to doubledash.exe.
+   shader cache are kept next to DoubleDashRedux.exe.
 2. Put the disc image in the same folder, or select it in the launcher (Game disc / CHANGE). The
    choice is remembered in settings.ini.
-3. Start doubledash.exe: the launcher opens. Pick your settings and press PLAY.
+3. Start DoubleDashRedux.exe: the launcher opens. Pick your settings and press PLAY.
 
 Controls
 --------
@@ -52,7 +53,7 @@ The launcher (shown before the game starts) sets the display mode, window size, 
 resolution, refresh rate, distance blur, sound, rumble and the disc image; changes are saved at once.
 Mouse, keyboard (arrows, Q / E pages, Enter plays, Esc quits) and controllers (d-pad, LB / RB pages,
 A changes, START plays, B quits) all work. Turn "Show launcher" off (SYSTEM page) to start the game
-directly; hold Shift while starting doubledash.exe to open the launcher again. doubledash.exe --play
+directly; hold Shift while starting DoubleDashRedux.exe to open the launcher again. DoubleDashRedux.exe --play
 skips it once, --launcher shows it once.
 
 Settings
@@ -77,5 +78,12 @@ the European region can be copied here, and back).
 
 Problems
 --------
-doubledash.log, next to the executable, records what happened during the last run; please include it
+DoubleDashRedux.log, next to the executable, records what happened during the last run; please include it
 when reporting a problem.
+
+Licence
+-------
+Double Dash Redux is free software under the GNU General Public License, version 2 or (at your option) any
+later version: see LICENSE.txt. The source code is at https://github.com/OWNER/double-dash-redux.
+It includes the Zstandard decompressor (BSD licence, LICENSE-zstd.txt).
+Mario Kart: Double Dash!! is (c) 2003 Nintendo. This project is not affiliated with or endorsed by Nintendo.

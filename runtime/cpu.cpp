@@ -218,7 +218,7 @@ void rt_log(const char* cat, const char* fmt, ...) {
     va_start(ap, fmt);
     vsnprintf(buf, sizeof buf, fmt, ap);
     va_end(ap);
-    if (!s_logfile) s_logfile = fopen("doubledash.log", "w");
+    if (!s_logfile) s_logfile = fopen("DoubleDashRedux.log", "w");
     fprintf(stderr, "[%s] %s\n", cat, buf);
     if (s_logfile) { fprintf(s_logfile, "[%s] %s\n", cat, buf); fflush(s_logfile); }
 }
@@ -249,7 +249,7 @@ void rt_panic(const char* fmt, ...) {
     if (getenv("DD_DUMP_RAM")) {   // write main RAM for offline inspection
         if (FILE* f = fopen("crash_ram.bin", "wb")) { fwrite(g_mem, 1, 0x01800000, f); fclose(f); }
     }
-    MessageBoxA(nullptr, buf, "Double Dash runtime panic", MB_OK | MB_ICONERROR);
+    MessageBoxA(nullptr, buf, "Double Dash Redux: runtime panic", MB_OK | MB_ICONERROR);
     ExitProcess(1);
 }
 
@@ -264,7 +264,7 @@ static LONG CALLBACK crash_handler(EXCEPTION_POINTERS* ep) {
     rt_log("CRASH", "exception %08lX at host rip=%llX (image+%llX) fault=%llX", code, rip, rip - (u64)mod, fault);
     if (fault >= (u64)g_mem && fault < (u64)g_mem + 0x40000000ull)
         rt_log("CRASH", "guest physical address %08llX", fault - (u64)g_mem);
-    rt_panic("host exception %08lX (see doubledash.log)", code);
+    rt_panic("host exception %08lX (see DoubleDashRedux.log)", code);
 }
 
 void cpu_init() {

@@ -100,7 +100,7 @@ static DWORD WINAPI watchdog(void*) {
     }
 }
 
-// The data directory (settings.ini, saves\, cache\, doubledash.log) is the executable's directory, or in the
+// The data directory (settings.ini, saves\, cache\, DoubleDashRedux.log) is the executable's directory, or in the
 // development tree the project root (the directory holding orig\game.iso), so the exe can be started from
 // anywhere (double-click, shortcut, out\Release\...).
 static void find_data_dir() {
@@ -124,7 +124,7 @@ int main(int argc, char** argv) {
     SetProcessDPIAware();
     find_data_dir();
     cfg_load();
-    // a windows-subsystem exe: the log goes to doubledash.log, and to stderr when that is redirected (tools\run.ps1)
+    // a windows-subsystem exe: the log goes to DoubleDashRedux.log, and to stderr when that is redirected (tools\run.ps1)
     // or when a console is asked for
     if (cfg_bool("debug.console", false, "DD_CONSOLE") && !GetStdHandle(STD_ERROR_HANDLE) && AllocConsole())
         freopen("CONOUT$", "w", stderr);

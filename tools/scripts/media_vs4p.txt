@@ -1,0 +1,76 @@
+# README media: 4-player splitscreen Versus race on autopilot (Mushroom Cup / Luigi Circuit, menu path of
+# vs4p_auto.txt), a PNG every 2 fields for 24 s once the race runs -> shots/media_vs4p_NNN.png.
+#   set DD_WIDESCREEN=1 DD_EFB_SCALE=2; powershell -File tools/run.ps1 -NoBuild -Seconds 140 -Autopilot on -Monitor 2 -Mute
+#       -Script tools/scripts/media_vs4p.txt
+pads 4
+
+hold 12 START
+wait 48
+hold 12 SL
+wait 48
+hold 12 A
+wait 48
+hold 12 START
+wait 48
+hold 12 SL
+wait 48
+hold 12 A
+wait 48
+hold 12 START
+wait 48
+hold 12 SL
+wait 48
+hold 12 A
+wait 48
+hold 12 START
+wait 48
+hold 12 SL
+wait 48
+hold 12 A
+wait 48
+hold 12 START
+wait 48
+hold 12 SL
+wait 48
+hold 12 A
+wait 48
+hold 12 START
+wait 48
+hold 12 SL
+wait 48
+hold 12 A
+wait 48
+mark title menu
+tap START
+wait 60
+tap SD x3
+wait 30
+tap A
+wait 90
+tap A A@2 A@3 A@4
+wait 78
+tap A A@2 A@3 A@4
+wait 78
+tap A A@2 A@3 A@4
+wait 78
+tap A A@2 A@3 A@4
+wait 78
+tap A A@2 A@3 A@4
+wait 78
+tap A A@2 A@3 A@4
+wait 78
+tap A A@2 A@3 A@4
+wait 78
+tap A A@2 A@3 A@4
+wait 78
+tap A A@2 A@3 A@4
+wait 78
+tap A A@2 A@3 A@4
+wait 78
+mark race running
+wait 250
+autoshot media_vs4p 2
+wait 1200
+autoshot off
+mark done
+quit 0

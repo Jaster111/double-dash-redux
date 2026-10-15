@@ -3,9 +3,10 @@
   python tools/recomp/recomp.py              (run from the project root)
 
 Inputs
-  orig/sys/main.dol
-  build/rea_procedures.json      REA list_procedures output (Ghidra analysis)
-  build/matched_symbols.json     names recovered from debugInfoS.MAP (optional)
+  build/main.dol                 the game's DOL (tools/build.ps1 extracts it from the disc image;
+                                 orig/sys/main.dol in the analysis tree is used when it is missing)
+  tools/recomp/functions.txt     known function starts and names (export_functions.py writes it
+                                 from the REA/Ghidra analysis and the link-map match)
   runtime/hle_functions.txt      "<addr|name> <hle symbol>" functions implemented natively
 Outputs
   build/recomp/funcs_NNN.cpp     generated guest functions
@@ -1037,16 +1038,17 @@ def load_hle(path, names_rev):
 
 
 def main():
-    dol = gcdol.load_dol("orig/sys/main.dol")
+    dol = gcdol.load_dol("build/main.dol" if os.path.exists("build/main.dol") else "orig/sys/main.dol")
     prog = Program(dol)
     seeds = set()
-    if os.path.exists("build/rea_procedures.json"):
-        seeds |= {int(p["address"], 16) for p in json.load(open("build/rea_procedures.json"))["normalized_result"]}
     names = {}
-    if os.path.exists("build/matched_symbols.json"):
-        for m in json.load(open("build/matched_symbols.json")):
-            names[m["addr"]] = m["name"]
-            seeds.add(m["addr"])
+    for line in open(os.path.join(HERE, "functions.txt")):
+        f = line.split()
+        if not f or f[0].startswith("#"):
+            continue
+        seeds.add(int(f[0], 16))
+        if len(f) > 1:
+            names[int(f[0], 16)] = f[1]
     seeds.add(dol.entry)
     ptrs = data_code_pointers(prog)
     prog.ptr_list = sorted(ptrs)

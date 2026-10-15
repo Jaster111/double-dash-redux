@@ -1,0 +1,116 @@
+# README media: Grand Prix race (Star Cup / Sherbet Land, same menu path as race_perf.txt) on autopilot,
+# 16:9, a PNG every 2 fields (25 fps at 50 Hz) from the pre-race intro for 32 s -> shots/media_race_NNN.png.
+#   set DD_WIDESCREEN=1 DD_EFB_SCALE=2; powershell -File tools/run.ps1 -NoBuild -Seconds 140 -Autopilot on -Monitor 2 -Mute
+#       -Script tools/scripts/media_race.txt
+hold 12 START
+wait 48
+hold 12 SL
+wait 48
+hold 12 A
+wait 48
+hold 12 START
+wait 48
+hold 12 SL
+wait 48
+hold 12 A
+wait 48
+hold 12 START
+wait 48
+hold 12 SL
+wait 48
+hold 12 A
+wait 48
+hold 12 START
+wait 48
+hold 12 SL
+wait 48
+hold 12 A
+wait 48
+hold 12 START
+wait 48
+hold 12 SL
+wait 48
+hold 12 A
+wait 48
+hold 12 START
+wait 48
+hold 12 SL
+wait 48
+hold 12 A
+wait 48
+hold 12 START
+wait 48
+hold 12 SL
+wait 48
+hold 12 A
+wait 48
+hold 12 START
+wait 48
+hold 12 SL
+wait 48
+hold 12 A
+wait 48
+hold 12 START
+wait 48
+hold 12 SL
+wait 48
+hold 12 A
+wait 48
+hold 12 START
+wait 48
+hold 12 SL
+wait 48
+hold 12 A
+wait 48
+hold 12 START
+wait 48
+hold 12 SL
+wait 48
+hold 12 A
+wait 48
+hold 12 START
+wait 48
+hold 12 SL
+wait 48
+hold 12 A
+wait 48
+hold 12 START
+wait 48
+hold 12 SL
+wait 48
+hold 12 A
+wait 48
+hold 12 START
+wait 48
+hold 12 SL
+wait 48
+hold 12 A
+wait 48
+hold 12 START
+wait 48
+hold 12 SL
+wait 48
+hold 12 A
+wait 48
+hold 12 START
+wait 48
+hold 12 SL
+wait 48
+hold 12 A
+wait 48
+hold 12 START
+wait 48
+hold 12 SL
+wait 48
+hold 12 A
+wait 48
+hold 12 START
+wait 48
+mark race intro
+shot media_race_intro
+hold 30 A
+autoshot media_race 2
+wait 1600
+autoshot off
+mark done
+quit 0

@@ -270,7 +270,7 @@ struct Launcher {
                L"Dolphin .rvz.", ID_DISC);
         toggle(SYSTEM, L"Show launcher", L"Off: the game starts directly. Hold Shift while starting it to see this "
                L"window again.", "launcher.show", true);
-        action(SYSTEM, L"Data folder", L"Opens the folder with settings.ini, the memory card saves and doubledash.log.",
+        action(SYSTEM, L"Data folder", L"Opens the folder with settings.ini, the memory card saves and DoubleDashRedux.log.",
                ID_FOLDER);
         update_winsizes(false);
     }
@@ -567,7 +567,7 @@ struct Launcher {
         }
 
         // title bar
-        text(L"MARIO KART: DOUBLE DASH!!  ·  LAUNCHER", f_title, {24, 0, 600, 40}, rgb(0xFFFFFF, 0.75f));
+        text(L"DOUBLE DASH REDUX  ·  LAUNCHER", f_title, {24, 0, 600, 40}, rgb(0xFFFFFF, 0.75f));
         {
             D2D1_RECT_F mn = {W - 92, 4, W - 50, 36}, cl = {W - 46, 4, W - 4, 36};
             if (hovered(H_MIN)) fill_round(mn, 6, col(0xFFFFFF, 0.12f));
@@ -935,7 +935,7 @@ struct Launcher {
         wc.style = CS_DROPSHADOW;
         wc.lpfnWndProc = wndproc;
         wc.hInstance = GetModuleHandleW(nullptr);
-        wc.lpszClassName = L"DoubleDashLauncher";
+        wc.lpszClassName = L"DoubleDashReduxLauncher";
         wc.hCursor = LoadCursor(nullptr, IDC_ARROW);
         RegisterClassW(&wc);
         // the display: DD_MONITOR (tests), else the primary one; fit the layout into its work area
@@ -959,7 +959,7 @@ struct Launcher {
         scale = std::min({dpi / 96.f, ww * 0.95f / W, wh * 0.95f / H});
         int pw = (int)(W * scale), ph = (int)(H * scale);
         int x = f.work.left + (int)(ww - pw) / 2, y = f.work.top + (int)(wh - ph) / 2;
-        wnd = CreateWindowExW(WS_EX_APPWINDOW, L"DoubleDashLauncher", L"Mario Kart: Double Dash!! — Launcher",
+        wnd = CreateWindowExW(WS_EX_APPWINDOW, L"DoubleDashReduxLauncher", L"Double Dash Redux",
                               WS_POPUP | WS_MINIMIZEBOX | WS_SYSMENU, x, y, pw, ph, nullptr, nullptr, wc.hInstance, nullptr);
         SetWindowLongPtrW(wnd, GWLP_USERDATA, (LONG_PTR)this);
         ShowWindow(wnd, f.found ? SW_SHOWNOACTIVATE : SW_SHOW);

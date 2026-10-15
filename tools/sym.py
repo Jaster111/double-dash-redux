@@ -1,14 +1,13 @@
 """Annotate guest addresses (8xxxxxxx) in a runtime log with function names.
 
-  python tools/sym.py [doubledash.log] [--only hang]     (default: doubledash.log, all lines)
+  python tools/sym.py [DoubleDashRedux.log] [--only hang]     (default: DoubleDashRedux.log, all lines)
   python tools/sym.py --addr 80094754 800EB794            look up single addresses
 
-Names come from build/matched_symbols.json (link-map names transferred to the retail
+Names come from tools/recomp/functions.txt (link-map names transferred to the retail
 DOL); addresses outside a matched symbol fall back to the recompiled function that
 contains them (fn_XXXXXXXX from build/recomp/functable.cpp).
 """
 import bisect
-import json
 import os
 import re
 import sys
@@ -18,9 +17,11 @@ ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
 def load():
     syms = []
-    with open(os.path.join(ROOT, "build", "matched_symbols.json")) as f:
-        for s in json.load(f):
-            syms.append((s["addr"], s.get("size") or 0, s["name"]))
+    with open(os.path.join(ROOT, "tools", "recomp", "functions.txt")) as f:
+        for line in f:
+            s = line.split()
+            if len(s) == 3 and not s[0].startswith("#"):
+                syms.append((int(s[0], 16), int(s[2]), s[1]))
     syms.sort()
     funcs = []
     with open(os.path.join(ROOT, "build", "recomp", "functable.cpp")) as f:
@@ -69,7 +70,7 @@ def main():
         i = args.index("--only")
         only = args[i + 1]
         del args[i:i + 2]
-    path = args[0] if args else os.path.join(ROOT, "doubledash.log")
+    path = args[0] if args else os.path.join(ROOT, "DoubleDashRedux.log")
     sys.stdout.reconfigure(encoding="utf-8", errors="replace")
     with open(path, encoding="utf-8", errors="replace") as f:
         for line in f:

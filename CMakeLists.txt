@@ -1,13 +1,34 @@
 cmake_minimum_required(VERSION 3.20)
-project(doubledash C CXX)
+project(DoubleDashRedux C CXX)
 
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 # static CRT: the exe runs without the Visual C++ redistributable
 set(CMAKE_MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>")
 
+# zstd decompressor (BSD, third_party/zstd): reads RVZ disc images
+file(GLOB ZSTD_SOURCES ${CMAKE_SOURCE_DIR}/third_party/zstd/lib/common/*.c ${CMAKE_SOURCE_DIR}/third_party/zstd/lib/decompress/*.c)
+add_library(zstd_dec STATIC ${ZSTD_SOURCES})
+target_compile_definitions(zstd_dec PRIVATE ZSTD_DISABLE_ASM)
+if(MSVC)
+  target_compile_options(zstd_dec PRIVATE /O2 /W0)
+endif()
+
+# main.dol out of the user's disc image, for the recompiler (tools/build.ps1 runs it)
+add_executable(dolextract tools/dolextract/dolextract.cpp runtime/host/disc_image.cpp)
+target_link_libraries(dolextract PRIVATE zstd_dec)
+target_include_directories(dolextract PRIVATE ${CMAKE_SOURCE_DIR}/runtime)
+if(MSVC)
+  target_compile_options(dolextract PRIVATE /W3 /utf-8)
+  target_compile_definitions(dolextract PRIVATE _CRT_SECURE_NO_WARNINGS NOMINMAX WIN32_LEAN_AND_MEAN)
+endif()
+
 file(GLOB GENERATED_SOURCES ${CMAKE_SOURCE_DIR}/build/recomp/*.cpp)
 file(GLOB_RECURSE RUNTIME_SOURCES ${CMAKE_SOURCE_DIR}/runtime/*.cpp)
+if(NOT GENERATED_SOURCES)
+  message(STATUS "build/recomp/ is empty: only dolextract is configured. Run tools/build.ps1 to recompile the game.")
+  return()
+endif()
 
 # generated code is huge: compile it as its own library with fast settings
 add_library(recomp STATIC ${GENERATED_SOURCES})
@@ -20,15 +41,8 @@ if(DD_SPCHECK)
   target_compile_definitions(recomp PRIVATE DD_SPCHECK)
 endif()
 
-# zstd decompressor (BSD, third_party/zstd): reads RVZ disc images
-file(GLOB ZSTD_SOURCES ${CMAKE_SOURCE_DIR}/third_party/zstd/lib/common/*.c ${CMAKE_SOURCE_DIR}/third_party/zstd/lib/decompress/*.c)
-add_library(zstd_dec STATIC ${ZSTD_SOURCES})
-target_compile_definitions(zstd_dec PRIVATE ZSTD_DISABLE_ASM)
-if(MSVC)
-  target_compile_options(zstd_dec PRIVATE /O2 /W0)
-endif()
-
 add_executable(doubledash ${RUNTIME_SOURCES})
+set_target_properties(doubledash PROPERTIES OUTPUT_NAME DoubleDashRedux)
 target_link_libraries(doubledash PRIVATE recomp zstd_dec d3d11 dxgi d3dcompiler xinput winmm ole32 windowscodecs comdlg32 d2d1 dwrite shell32)
 target_include_directories(doubledash PRIVATE ${CMAKE_SOURCE_DIR}/runtime ${CMAKE_SOURCE_DIR}/build/recomp)
 if(MSVC)

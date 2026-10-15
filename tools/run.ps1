@@ -11,20 +11,18 @@
 # -Autopilot sets DD_AUTOPILOT (the game's AI drives the players' karts; win = also keep P1 first in GP points).
 # -Monitor N opens the window on display N without taking the focus (DD_MONITOR), -Mute sets DD_MUTE (no audio device).
 # -RunDir runs the game in another directory (it needs orig\ there, e.g. a junction, and gets its own
-# doubledash.log, shots\, saves\ and cache\), so two test runs can go at the same time.
+# DoubleDashRedux.log, shots\, saves\ and cache\), so two test runs can go at the same time.
 # Test runs are windowed (DD_FULLSCREEN=0) unless DD_FULLSCREEN is set; settings.ini supplies everything else.
 # Other DD_* variables already set in the environment are passed through.
 param([int]$Seconds = 20, [switch]$NoBuild, [int]$Lines = 80, [string]$Script, [int]$Laps = -1, [switch]$HangExit,
       [switch]$Sym, [string]$Card, [switch]$NewCard, [switch]$Hz60, [string]$Autopilot, [int]$Monitor = 0, [switch]$Mute, [string]$RunDir)
 Set-Location (Split-Path $PSScriptRoot -Parent)
 if (-not $NoBuild) {
-    cmake -S . -B out -G "Visual Studio 17 2022" -A x64 | Out-Null
-    cmake --build out --config Release -- /m /v:minimal 2>&1 | Out-File -Encoding utf8 out\build.log
-    $errs = Select-String -Path out\build.log -Pattern ": error" | Select-Object -First 30
-    if ($errs) { $errs | ForEach-Object { $_.Line }; exit 1 }
+    powershell -ExecutionPolicy Bypass -File tools\build.ps1 | Out-Host
+    if ($LASTEXITCODE) { exit 1 }
 }
 if ($Script) { $env:DD_SCRIPT = (Resolve-Path $Script).Path }
-$exe = (Resolve-Path out\Release\doubledash.exe).Path
+$exe = (Resolve-Path out\Release\DoubleDashRedux.exe).Path
 if ($RunDir) { Set-Location $RunDir }
 if ($Card) {
     if ($NewCard) { Remove-Item $Card -ErrorAction SilentlyContinue }
@@ -38,14 +36,14 @@ if ($Monitor -gt 0) { $env:DD_MONITOR = "$Monitor" }
 if ($Mute) { $env:DD_MUTE = "1" }
 if (-not $env:DD_FULLSCREEN) { $env:DD_FULLSCREEN = "0" }   # test runs stay windowed whatever settings.ini says
 if (-not $env:DD_LAUNCHER) { $env:DD_LAUNCHER = "0" }       # and skip the launcher (set DD_LAUNCHER=1 to see it)
-Remove-Item doubledash.log -ErrorAction SilentlyContinue
+Remove-Item DoubleDashRedux.log -ErrorAction SilentlyContinue
 $p = Start-Process -FilePath $exe -PassThru -RedirectStandardError out\stderr.txt -RedirectStandardOutput out\stdout.txt
 $null = $p.Handle   # keep the handle open so ExitCode is available afterwards
 $p.WaitForExit($Seconds * 1000) | Out-Null
 $code = 124
 if (!$p.HasExited) { Stop-Process -Id $p.Id -Force; "== killed after $Seconds s" } else { $code = $p.ExitCode; "== exited with code $code" }
-if (Test-Path doubledash.log) {
-    if ($Sym) { python tools\sym.py doubledash.log | Select-Object -Last $Lines }
-    else { Get-Content doubledash.log -Tail $Lines }
+if (Test-Path DoubleDashRedux.log) {
+    if ($Sym) { python tools\sym.py DoubleDashRedux.log | Select-Object -Last $Lines }
+    else { Get-Content DoubleDashRedux.log -Tail $Lines }
 }
 exit $code

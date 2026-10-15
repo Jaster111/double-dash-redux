@@ -17,7 +17,7 @@ extern const char* g_iso_path;   // hw/di.cpp
 
 static const char GAME_ID[] = "GM4P01";
 static const u32 DOL_SIZE = 3613184, DOL_CRC32 = 0x3B7E37E3;
-static const char* const TITLE = "Mario Kart: Double Dash!!";
+static const char* const TITLE = "Double Dash Redux";
 
 static std::wstring widen(const std::string& s) {
     std::wstring w(MultiByteToWideChar(CP_UTF8, 0, s.c_str(), -1, nullptr, 0), 0);

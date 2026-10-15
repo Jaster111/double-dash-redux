@@ -10,7 +10,7 @@
 static const char* const SETTINGS_FILE = "settings.ini";
 
 static const char* const DEFAULT_SETTINGS =
-    "; Mario Kart: Double Dash!! settings.  Changes take effect the next time the game starts.\n"
+    "; Double Dash Redux settings.  Changes take effect the next time the game starts.\n"
     "\n"
     "[game]\n"
     "; disc image (Europe, GM4P01: .iso / .gcm, or Dolphin .rvz); empty = look next to the executable, or ask\n"

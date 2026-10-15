@@ -1,9 +1,9 @@
 @echo off
-rem Launch Mario Kart: Double Dash!! (native Windows build).  Build first with tools\run.ps1.
+rem Launch Double Dash Redux.  Build first with tools\build.ps1.
 cd /d "%~dp0"
-if not exist "out\Release\doubledash.exe" (
-  echo out\Release\doubledash.exe not found - build it first:  powershell -ExecutionPolicy Bypass -File tools\run.ps1 -Seconds 1
+if not exist "out\Release\DoubleDashRedux.exe" (
+  echo out\Release\DoubleDashRedux.exe not found - build it first:  powershell -ExecutionPolicy Bypass -File tools\build.ps1
   pause
   exit /b 1
 )
-start "" "out\Release\doubledash.exe"
+start "" "out\Release\DoubleDashRedux.exe"

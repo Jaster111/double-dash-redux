@@ -81,7 +81,7 @@ void host_init() {
     WNDCLASSA wc = {};
     wc.lpfnWndProc = wndproc;
     wc.hInstance = GetModuleHandleA(nullptr);
-    wc.lpszClassName = "DoubleDash";
+    wc.lpszClassName = "DoubleDashRedux";
     wc.hCursor = LoadCursor(nullptr, IDC_ARROW);
     RegisterClassA(&wc);
     RECT r = {0, 0, std::clamp(cfg_int("video.window_width", 1280), 160, 16384),
@@ -107,7 +107,7 @@ void host_init() {
         x = f.work.left + std::max(0, (int)(f.work.right - f.work.left - w) / 2);
         y = f.work.top + std::max(0, (int)(f.work.bottom - f.work.top - h) / 2);
     }
-    s_wnd = CreateWindowA("DoubleDash", "Mario Kart: Double Dash!!", WS_OVERLAPPEDWINDOW | (f.found ? 0 : WS_VISIBLE), x, y,
+    s_wnd = CreateWindowA("DoubleDashRedux", "Double Dash Redux", WS_OVERLAPPEDWINDOW | (f.found ? 0 : WS_VISIBLE), x, y,
                           w, h, nullptr, nullptr, wc.hInstance, nullptr);
     if (f.found) {
         ShowWindow(s_wnd, SW_SHOWNOACTIVATE);
