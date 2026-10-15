@@ -9,3 +9,4 @@ OSPanic         HLE_OSPanic
 0x80186824      HLE_RaceMgr_ct          # RaceMgr::RaceMgr (host/debug.cpp, DD_AUTOPILOT=ghost)
 0x801CDE4C      HLE_RaceApp_ctrlRecorder  # RaceApp::ctrlRecorder (host/debug.cpp, DD_AUTOPILOT=ghost)
 0x801B0A28      HLE_THPGXYuv2RgbDraw    # THPGXYuv2RgbDraw (host/patches.cpp: movie frames stay 4:3 in widescreen)
+0x801AB6C0      HLE_ShimmerScreen_draw  # ShimmerScreen::draw (host/patches.cpp: video.depth_blur = 0 skips the distance blur / heat shimmer)

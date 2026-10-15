@@ -28,6 +28,8 @@ static const char* const DEFAULT_SETTINGS =
     "pal60 = 1\n"
     "; 1 = 16:9 widescreen (the \"16:9 Widescreen v2\" code by Ralf and Kester, with its menu backgrounds add-on)\n"
     "widescreen = 0\n"
+    "; 1 = the race courses' distance blur and heat shimmer, as on the console; 0 = everything stays sharp\n"
+    "depth_blur = 1\n"
     "\n"
     "[audio]\n"
     "; master volume in percent (0-100)\n"

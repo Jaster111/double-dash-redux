@@ -25,6 +25,15 @@ void HLE_THPGXYuv2RgbDraw(CPU* c) {
     orig_801B0A28(c);
 }
 
+// ShimmerScreen::draw (GM4P01 0x801AB6C0): blends a half-resolution copy of the scene over the far depth range
+// (the courses' distance blur; with an indirect map also the heat shimmer).  settings.ini video.depth_blur = 0
+// (DD_BLUR=0) skips it.
+void orig_801AB6C0(CPU* c);
+void HLE_ShimmerScreen_draw(CPU* c) {
+    static const bool on = cfg_bool("video.depth_blur", true, "DD_BLUR");
+    if (on) orig_801AB6C0(c);
+}
+
 void patches_init() {
     for (unsigned n = 0; n < g_patch_count; n++) {
         bool on = false;
