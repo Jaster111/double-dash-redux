@@ -29,10 +29,10 @@ if(MSVC)
 endif()
 
 add_executable(doubledash ${RUNTIME_SOURCES})
-target_link_libraries(doubledash PRIVATE recomp zstd_dec d3d11 dxgi d3dcompiler xinput winmm ole32 windowscodecs comdlg32)
+target_link_libraries(doubledash PRIVATE recomp zstd_dec d3d11 dxgi d3dcompiler xinput winmm ole32 windowscodecs comdlg32 d2d1 dwrite shell32)
 target_include_directories(doubledash PRIVATE ${CMAKE_SOURCE_DIR}/runtime ${CMAKE_SOURCE_DIR}/build/recomp)
 if(MSVC)
-  target_compile_options(doubledash PRIVATE /MP /W3 /wd4244 /wd4267 /wd4996 /wd4146)
+  target_compile_options(doubledash PRIVATE /MP /W3 /wd4244 /wd4267 /wd4996 /wd4146 /utf-8)
   target_compile_definitions(doubledash PRIVATE _CRT_SECURE_NO_WARNINGS NOMINMAX WIN32_LEAN_AND_MEAN)
   set_target_properties(doubledash PROPERTIES VS_DEBUGGER_WORKING_DIRECTORY ${CMAKE_SOURCE_DIR})
   # PDB for the profiler / crash logs (DD_PROF); does not affect code generation

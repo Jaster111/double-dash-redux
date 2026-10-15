@@ -128,6 +128,9 @@ int main(int argc, char** argv) {
     // or when a console is asked for
     if (cfg_bool("debug.console", false, "DD_CONSOLE") && !GetStdHandle(STD_ERROR_HANDLE) && AllocConsole())
         freopen("CONOUT$", "w", stderr);
+    bool launcher_wanted(int argc, char** argv);   // host/launcher.cpp
+    bool launcher_run(int argc, char** argv);
+    if (launcher_wanted(argc, argv) && !launcher_run(argc, argv)) return 0;
     void disc_select(int argc, char** argv);   // host/game_disc.cpp
     disc_select(argc, argv);
     tb_init();

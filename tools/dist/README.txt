@@ -18,9 +18,9 @@ Getting started
 ---------------
 1. Extract this folder anywhere you can write to (not into Program Files): settings, saves and the
    shader cache are kept next to doubledash.exe.
-2. Put the disc image in the same folder, or start doubledash.exe and select it when asked. The choice
-   is remembered in settings.ini.
-3. Start doubledash.exe.
+2. Put the disc image in the same folder, or select it in the launcher (Game disc / CHANGE). The
+   choice is remembered in settings.ini.
+3. Start doubledash.exe: the launcher opens. Pick your settings and press PLAY.
 
 Controls
 --------
@@ -45,6 +45,15 @@ Keyboard (player 1):
 Window:
   Alt+Enter or F11      toggle borderless fullscreen
   Alt+F4                quit
+
+Launcher
+--------
+The launcher (shown before the game starts) sets the display mode, window size, aspect ratio,
+resolution, refresh rate, distance blur, sound, rumble and the disc image; changes are saved at once.
+Mouse, keyboard (arrows, Q / E pages, Enter plays, Esc quits) and controllers (d-pad, LB / RB pages,
+A changes, START plays, B quits) all work. Turn "Show launcher" off (SYSTEM page) to start the game
+directly; hold Shift while starting doubledash.exe to open the launcher again. doubledash.exe --play
+skips it once, --launcher shows it once.
 
 Settings
 --------

@@ -37,6 +37,7 @@ if ($Autopilot) { $env:DD_AUTOPILOT = $Autopilot }
 if ($Monitor -gt 0) { $env:DD_MONITOR = "$Monitor" }
 if ($Mute) { $env:DD_MUTE = "1" }
 if (-not $env:DD_FULLSCREEN) { $env:DD_FULLSCREEN = "0" }   # test runs stay windowed whatever settings.ini says
+if (-not $env:DD_LAUNCHER) { $env:DD_LAUNCHER = "0" }       # and skip the launcher (set DD_LAUNCHER=1 to see it)
 Remove-Item doubledash.log -ErrorAction SilentlyContinue
 $p = Start-Process -FilePath $exe -PassThru -RedirectStandardError out\stderr.txt -RedirectStandardOutput out\stdout.txt
 $null = $p.Handle   # keep the handle open so ExitCode is available afterwards

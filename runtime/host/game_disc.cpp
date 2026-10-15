@@ -104,20 +104,23 @@ static void message(const std::string& text, UINT icon) {
     MessageBoxW(nullptr, widen(text).c_str(), widen(TITLE).c_str(), MB_OK | icon);
 }
 
-static std::string ask_for_image() {
-    if (s_noui) ExitProcess(2);
+// file dialog for the image ("" when cancelled)
+std::string disc_browse(void* owner) {
     wchar_t file[MAX_PATH * 4] = {};
     OPENFILENAMEW ofn = {sizeof ofn};
+    ofn.hwndOwner = (HWND)owner;
     ofn.lpstrTitle = L"Select your Mario Kart: Double Dash!! (Europe) disc image";
-    ofn.lpstrFilter = L"GameCube disc images (*.iso, *.gcm)\0*.iso;*.gcm\0All files (*.*)\0*.*\0";
+    ofn.lpstrFilter = L"GameCube disc images (*.iso, *.gcm, *.rvz)\0*.iso;*.gcm;*.rvz\0All files (*.*)\0*.*\0";
     ofn.lpstrFile = file;
     ofn.nMaxFile = sizeof file / sizeof *file;
     ofn.Flags = OFN_FILEMUSTEXIST | OFN_PATHMUSTEXIST | OFN_NOCHANGEDIR;
     return GetOpenFileNameW(&ofn) ? narrow(file) : std::string();
 }
 
-void disc_select(int argc, char** argv) {
-    static std::string chosen;
+std::string disc_check(const std::string& path) { return check_image(path); }
+
+// The first candidate that is the right image ("" if none); `refused` lists the others and why.
+std::string disc_find(int argc, char** argv, std::string* refused) {
     std::vector<std::pair<std::string, bool>> cands;   // path, given explicitly (checked even if it is missing)
     for (int i = 1; i + 1 < argc; i++)
         if (!strcmp(argv[i], "--iso")) {
@@ -129,20 +132,26 @@ void disc_select(int argc, char** argv) {
     if (configured && *configured) cands.push_back({configured, true});
     cands.push_back({"orig/game.iso", false});
     for (auto& p : images_in_dir()) cands.push_back({p, false});
-
-    std::string refused;   // the candidates that are not the right image, and why
     for (auto& c : cands) {
         if (!c.second && GetFileAttributesW(widen(c.first).c_str()) == INVALID_FILE_ATTRIBUTES) continue;
         std::string why = check_image(c.first);
-        if (why.empty()) { chosen = c.first; break; }
-        refused += c.first + "\n" + why + "\n\n";
+        if (why.empty()) return c.first;
+        if (refused) *refused += c.first + "\n" + why + "\n\n";
     }
+    return "";
+}
+
+void disc_select(int argc, char** argv) {
+    static std::string chosen;
+    std::string refused;   // the candidates that are not the right image, and why
+    chosen = disc_find(argc, argv, &refused);
     if (chosen.empty())
         message(refused + "Please select your disc image of Mario Kart: Double Dash!! (Europe, GM4P01) as an "
                 "ISO (.iso / .gcm) or Dolphin RVZ (.rvz), for example one dumped from your own disc with Dolphin.",
                 refused.empty() ? MB_ICONINFORMATION : MB_ICONWARNING);
     while (chosen.empty()) {
-        std::string p = ask_for_image();
+        if (s_noui) ExitProcess(2);
+        std::string p = disc_browse(nullptr);
         if (p.empty()) ExitProcess(1);
         std::string why = check_image(p);
         if (why.empty()) {
