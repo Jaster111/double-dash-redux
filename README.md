@@ -8,7 +8,6 @@
 </p>
 
 <p align="center">
-  <a href="https://github.com/Jaster111/double-dash-redux/releases/latest"><img alt="Download" src="https://img.shields.io/github/v/release/Jaster111/double-dash-redux?label=download&style=for-the-badge&color=e61e28"></a>
   <img alt="Platform: Windows" src="https://img.shields.io/badge/platform-Windows%2010%20%7C%2011-0078d4?style=for-the-badge&logo=windows">
   <img alt="Graphics: Direct3D 11" src="https://img.shields.io/badge/graphics-Direct3D%2011-555?style=for-the-badge">
   <a href="LICENSE"><img alt="Licence: GPL-2.0-or-later" src="https://img.shields.io/badge/licence-GPL--2.0--or--later-ffd200?style=for-the-badge"></a>
@@ -18,7 +17,6 @@
   <a href="#-quick-start">Quick start</a> •
   <a href="#-features">Features</a> •
   <a href="#-controls">Controls</a> •
-  <a href="#-building-from-source">Building</a> •
   <a href="#-how-it-works">How it works</a> •
   <a href="#-faq">FAQ</a>
 </p>
@@ -39,7 +37,7 @@
 |---|---|
 | 🏁 **The whole game** | Grand Prix (all cups, 50cc to Mirror and the All-Cup Tour), Time Trials with ghosts and staff ghosts, Versus, all three battle modes, award ceremonies, the opening movie and the staff roll. |
 | 🖥️ **High resolution** | Internal resolution from 1× to 8× the GameCube's 640×528, so 4K is possible, in a window or borderless fullscreen (<kbd>Alt</kbd>+<kbd>Enter</kbd> / <kbd>F11</kbd>). |
-| 📺 **16:9 widescreen** | A true widescreen view in races, with the HUD at the screen edges, from the well-known *16:9 Widescreen v2* code (Ralf & Kester). |
+| 📺 **16:9 widescreen** | A true widescreen view in races, with the HUD at the screen edges, from the well-known [*16:9 Widescreen v2*](https://github.com/dolphin-emu/dolphin/blob/0113b249bbb7eb79e8756697783f95adb1bd7951/Data/Sys/GameSettings/GM4P01.ini#L143-L232) code by Ralf and Kester. |
 | ⏱️ **60 Hz** | The PAL release's 60 Hz mode is preselected at boot; 50 Hz is still there. |
 | 🎮 **4-player split screen** | Up to four Xbox-style (XInput) controllers with rumble, plus keyboard controls for player 1. |
 | 💾 **Dolphin-compatible saves** | The memory card is a Dolphin `.raw` image, so you can move saves between Double Dash Redux and Dolphin. |
@@ -64,10 +62,21 @@
 
 ## 🚀 Quick start
 
-1. **Download** the latest `DoubleDashRedux-*.zip` from [Releases](https://github.com/Jaster111/double-dash-redux/releases/latest).
-2. **Extract** it to a folder you can write to (not *Program Files*). Settings, saves and the shader cache are kept next to the exe.
-3. **Add your disc image**: put the `.iso`, `.gcm` or `.rvz` in the same folder, or pick it in the launcher (*SYSTEM → Game disc*).
-4. **Run `DoubleDashRedux.exe`**, choose your settings and press **PLAY**.
+There are no ready-made downloads. The game's code is recompiled from **your own disc image** on your PC, so you
+build Double Dash Redux yourself. It is one command.
+
+1. **Install** Visual Studio 2022 or newer with *Desktop development with C++*, CMake 3.20+ and Python 3.8+.
+2. **Build** it from your disc image (`.iso`, `.gcm` or `.rvz`):
+   ```powershell
+   git clone https://github.com/Jaster111/double-dash-redux.git
+   cd double-dash-redux
+   powershell -ExecutionPolicy Bypass -File tools\build.ps1 -Disc "D:\Games\Mario Kart Double Dash (Europe).rvz"
+   ```
+3. **Run `out\Release\DoubleDashRedux.exe`**. On the first start, pick your disc image when asked (or later in the
+   launcher, *SYSTEM → Game disc*), choose your settings and press **PLAY**.
+
+Settings, saves and the shader cache are kept next to the exe. To play from another folder, copy the exe there
+(not into *Program Files*: the folder must be writable) together with your disc image.
 
 **Requirements:** Windows 10 or 11 (64-bit), a Direct3D 11 graphics card and any reasonably modern x64 CPU.
 4-player split screen is the most demanding mode.
@@ -82,7 +91,7 @@ Convert it in Dolphin: right-click the game → *Convert File…* → set *Forma
 <summary><b>I have the North American or Japanese release</b></summary>
 
 Not supported yet. The recompiled code comes from one exact executable, the European `GM4P01` release.
-The launcher tells you which release it found.
+The build checks your disc image and tells you which release it found.
 </details>
 
 ## ⚙️ Settings
@@ -127,24 +136,18 @@ The exe also takes command-line options: `--play` skips the launcher once and `-
 <kbd>Alt</kbd>+<kbd>Enter</kbd> or <kbd>F11</kbd> toggles fullscreen and <kbd>Alt</kbd>+<kbd>F4</kbd> quits.
 PlayStation, Switch and other controllers work through Steam Input or a tool such as DS4Windows, which present them as Xbox controllers.
 
-## 🔨 Building from source
+## 🔨 What the build does
 
-**You need:** Visual Studio 2022 or newer with *Desktop development with C++*, CMake 3.20+, Python 3.8+ and your `GM4P01` disc image.
-
-```powershell
-git clone https://github.com/Jaster111/double-dash-redux.git
-cd double-dash-redux
-powershell -ExecutionPolicy Bypass -File tools\build.ps1 -Disc "D:\Games\Mario Kart Double Dash (Europe).rvz"
-```
-
-The first build takes a few minutes. It:
+The first `tools\build.ps1` run (see [Quick start](#-quick-start)) takes a few minutes. It:
 
 1. extracts `main.dol` from your disc image and checks it against the expected CRC32 (`tools/dolextract`),
 2. recompiles it into about 13,500 C++ functions in `build/recomp/` (`tools/recomp/recomp.py`),
 3. compiles the runtime and the generated code into **`out\Release\DoubleDashRedux.exe`**.
 
 After that, `tools\build.ps1` only recompiles what changed. Use `-Recomp` to run the recompiler again after editing
-`tools/recomp/`, `runtime/hle_functions.txt` or `runtime/patches/`. `tools\package.ps1` builds the release zip in `dist\`.
+`tools/recomp/`, `runtime/hle_functions.txt` or `runtime/patches/`. `tools\package.ps1` packs the exe, a readme
+and the licences into a portable zip in `dist\` for your own use. Please do not share it: the exe contains the game's
+recompiled code.
 
 <details>
 <summary><b>Developer tools</b></summary>
@@ -200,8 +203,12 @@ No. There is no CPU interpreter or JIT: the game's code is translated to C++ onc
 other program. The runtime only provides what the GameCube's hardware and OS used to provide.
 
 **Does it include the game?**
-No. You need your own copy. The repository and the releases contain only original code plus a list of function addresses and
-names, and the game's code and assets are read from your disc image.
+No. You need your own copy. The repository contains only original code plus a list of function addresses and names.
+The game's code is recompiled from your disc image when you build, and its assets are read from the disc image while you play.
+
+**Why is there no download?**
+A built `DoubleDashRedux.exe` contains the game's code, translated to C++ and compiled. Sharing it would mean sharing
+Nintendo's code, so the project is distributed as source only and everyone builds it from their own disc.
 
 **Why only the European version?**
 Every release has a different `main.dol`, and the recompiled code and its patches are tied to one exact build.
@@ -213,7 +220,9 @@ Not yet: the runtime uses Direct3D 11, XAudio2 and XInput. It may run under Wine
 
 - [Dolphin](https://dolphin-emu.org/): Double Dash Redux's DSP audio renderer is a port of Dolphin's Zelda microcode HLE,
   and Dolphin's documentation of the GameCube hardware was essential.
-- **Ralf** and **Kester** for the *16:9 Widescreen v2* code and its menu-backgrounds add-on.
+- **Ralf** and **Kester** for the [*16:9 Widescreen v2*](https://github.com/dolphin-emu/dolphin/blob/0113b249bbb7eb79e8756697783f95adb1bd7951/Data/Sys/GameSettings/GM4P01.ini#L143-L232)
+  Gecko code, and **Ralf** for its [*16:9 Menu Backgrounds Add-On*](https://github.com/dolphin-emu/dolphin/blob/0113b249bbb7eb79e8756697783f95adb1bd7951/Data/Sys/GameSettings/GM4P01.ini#L233-L252),
+  both from Dolphin's game settings for this game.
 - The [Mario Kart: Double Dash!! decompilation](https://github.com/SwareJonge/mkdd) project, for reference on the game's internals.
 - [Zstandard](https://github.com/facebook/zstd) (BSD) for RVZ decompression, and [nod](https://github.com/encounter/nod) (`nodtool`) for disc tooling.
 - [Ghidra](https://ghidra-sre.org/) and Cuyler36's [GameCube loader](https://github.com/Cuyler36/Ghidra-GameCube-Loader) for the analysis that seeded the function list.
